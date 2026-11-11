@@ -2,7 +2,7 @@
   "name": "claude-activity-graph",
   "displayName": "Activity Graph for Claude Code",
   "description": "Live graph of what Claude Code is doing in this workspace: agents, tools, files and the code sections being edited. Unofficial.",
-  "version": "0.9.12",
+  "version": "0.9.13",
   "publisher": "local",
   "license": "MIT",
   "icon": "icon.png",

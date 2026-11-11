@@ -37,6 +37,7 @@ let highlightTimer = null;
 let demoTimers = [];
 let usageGuardTimer = null;
 let usageGuardErrorAt = 0;
+const usageGuardObserved = new Map();
 let waiting = false;      // Claude Code is blocked on a permission prompt
 let storeFile = null;     // where received events are kept so a reload does not lose them
 
@@ -497,36 +498,59 @@ function emitUsageGuard(sessionId, windowId, guardKey, stage, label, detail) {
   post({ type: 'event', event: e });
 }
 
+function hideCurrentUsageGuardStatus(sessionId, windowId, stage) {
+  if (stage !== 'careful' && stage !== 'stopped') return;
+  const kept = events.filter((e) => !(e.ev === 'UsageGuard' && e.session === sessionId &&
+    e.guardWindow === windowId && e.guardStage === stage));
+  if (kept.length === events.length) return;
+  events = kept;
+  if (storeFile) fs.writeFileSync(storeFile, events.map((e) => JSON.stringify(e)).join('\n') + (events.length ? '\n' : ''));
+  post({ type: 'init', events });
+}
+
 function pollUsageGuard() {
   try {
     const state = readOptionalJson(USAGE_GUARD_STATE);
     const win = state && state.win;
     const session = usageGuardSession();
     if (!win || !session || !['normal', 'careful', 'stopped'].includes(win.stage)) return;
-    const percent = Number.isFinite(win.est) ? Math.round(win.est) + '% used' : 'usage estimate unavailable';
-    const previous = [...events].reverse().find((e) => e.ev === 'UsageGuard' && e.session === session.id);
     const windowId = String(win.id || win.resetsAt || 'current');
-    if (win.stage === 'careful' || win.stage === 'stopped') {
-      const transitionAt = win.stage === 'careful' ? win.carefulSince : win.stoppedAt;
+    const resumed = readOptionalJson(USAGE_GUARD_RECORDS);
+    const record = resumed && resumed[session.id];
+    const transitionAt = win.stage === 'careful' ? win.carefulSince : win.stage === 'stopped' ? win.stoppedAt : null;
+    const snapshot = {
+      windowId,
+      stage: win.stage,
+      transitionAt: String(transitionAt || ''),
+      handedOffAt: String(session.handedOffAt || ''),
+      resumedAt: String(record && record.resumedAt || ''),
+    };
+    const previous = usageGuardObserved.get(session.id);
+    usageGuardObserved.set(session.id, snapshot);
+    if (!previous) {
+      hideCurrentUsageGuardStatus(session.id, windowId, win.stage);
+      return;
+    }
+
+    const percent = Number.isFinite(win.est) ? Math.round(win.est) + '% used' : 'usage estimate unavailable';
+    const stageChanged = previous.windowId !== windowId || previous.stage !== win.stage ||
+      previous.transitionAt !== snapshot.transitionAt;
+    if ((win.stage === 'careful' || win.stage === 'stopped') && stageChanged) {
       const detail = win.stage === 'careful'
         ? percent + ' of the 5-hour limit; use small steps'
         : percent + ' of the 5-hour limit; hand-off required until reset';
       emitUsageGuard(session.id, windowId, win.stage + ':' + windowId + ':' + (transitionAt || win.stage),
         win.stage, win.stage === 'careful' ? 'Careful mode' : 'Limit reached', detail);
-    } else if (previous && previous.guardStage !== 'normal' && previous.guardWindow !== windowId) {
+    } else if (win.stage === 'normal' && previous.stage !== 'normal' && previous.windowId !== windowId) {
       emitUsageGuard(session.id, windowId, 'resumed:' + windowId, 'resumed', 'Usage window reset', 'Normal mode resumed');
     }
 
-    if (win.stage !== 'normal') {
-      const handoffKey = 'handoff:' + (session.stoppedAt || '');
-      if (session.handedOffAt) {
-        emitUsageGuard(session.id, windowId, handoffKey, 'handoff', 'Hand-off saved', 'Session will resume after the usage reset');
-      }
+    if (win.stage !== 'normal' && snapshot.handedOffAt && snapshot.handedOffAt !== previous.handedOffAt) {
+      emitUsageGuard(session.id, windowId, 'handoff:' + (session.stoppedAt || ''), 'handoff',
+        'Hand-off saved', 'Session will resume after the usage reset');
     }
 
-    const resumed = readOptionalJson(USAGE_GUARD_RECORDS);
-    const record = resumed && resumed[session.id];
-    if (record && record.resumedAt) {
+    if (snapshot.resumedAt && snapshot.resumedAt !== previous.resumedAt) {
       emitUsageGuard(session.id, windowId, 'background-resumed:' + record.stoppedAt, 'resumed', 'Background session resumed', 'Usage limit reset');
     }
   } catch (e) {

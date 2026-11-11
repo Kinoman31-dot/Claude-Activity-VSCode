@@ -30,7 +30,7 @@ Click a file, a code section or an activity line to open it at the right line. L
 
 ## Install
 
-1. In VS Code: Extensions panel > `...` menu > **Install from VSIX...** and choose `claude-activity-graph-0.9.12.vsix`.
+1. In VS Code: Extensions panel > `...` menu > **Install from VSIX...** and choose `claude-activity-graph-0.9.13.vsix`.
 2. Open your project folder.
 3. Click **Claude Graph** in the status bar (bottom right), or the graph icon at the top right of any editor. The chart opens as an editor tab beside your code, like a Claude Code session; drag the tab wherever you want it. A docked copy is also available in the bottom panel as **Claude Activity** (set `claudeGraph.openIn` to `panel` to make that the default).
 4. Click **Connect this workspace**.
@@ -48,7 +48,7 @@ The extension listens on a local port (127.0.0.1 only). **Connect this workspace
 
 **Claude Graph: Disconnect This Workspace** removes the hooks again.
 
-The Usage Guard integration reads `state.json`, session records and resume records from `~/.claude-usage-guard` (or `USAGE_GUARD_DIR` when set). It only records guard state transitions for sessions whose project folder matches the open workspace. It does not read Claude credentials or the usage bar's token.
+The Usage Guard integration reads `state.json`, session records and resume records from `~/.claude-usage-guard` (or `USAGE_GUARD_DIR` when set). It only records guard state transitions for sessions whose project folder matches the open workspace. On startup it silently takes the current guard state as a baseline, so opening the Activity view does not add a box for an already-active state; only later transitions are shown. It does not read Claude credentials or the usage bar's token.
 
 ## Updating
 
