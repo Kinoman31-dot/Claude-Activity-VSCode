@@ -16,6 +16,10 @@ const HOOK_EVENTS = [
 const MAX_EVENTS = 3000;
 const MAX_BODY = 25 * 1024 * 1024;
 const MAX_FILE = 2 * 1024 * 1024;
+const USAGE_GUARD_DIR = process.env.USAGE_GUARD_DIR || path.join(os.homedir(), '.claude-usage-guard');
+const USAGE_GUARD_STATE = path.join(USAGE_GUARD_DIR, 'state.json');
+const USAGE_GUARD_SESSIONS = path.join(USAGE_GUARD_DIR, 'sessions');
+const USAGE_GUARD_RECORDS = path.join(USAGE_GUARD_DIR, 'guard.json');
 
 let context;
 let server = null;
@@ -30,6 +34,8 @@ let decoration;
 const highlights = new Map(); // fsPath -> [{start, end, expires}]
 let highlightTimer = null;
 let demoTimers = [];
+let usageGuardTimer = null;
+let usageGuardErrorAt = 0;
 let waiting = false;      // Claude Code is blocked on a permission prompt
 let storeFile = null;     // where received events are kept so a reload does not lose them
 
@@ -346,6 +352,11 @@ async function handleRaw(raw) {
   if (ev === 'PostToolUseFailure') e.error = short(raw.error, 140);
   if (ev === 'Stop' || ev === 'SubagentStop') e.detail = short(raw.last_assistant_message, 420);
   if (ev === 'Notification') { e.detail = short(raw.message, 160); e.ntype = raw.notification_type || null; }
+  if (ev === 'UsageGuard') {
+    e.guardStage = raw.guard_stage || 'careful';
+    e.guardLabel = short(raw.guard_label, 100);
+    e.detail = short(raw.guard_detail, 180);
+  }
 
   if (action) {
     const filePath = input.file_path || input.notebook_path;
@@ -426,6 +437,95 @@ function loadHistory() {
   } catch (e) { events = []; }
 }
 
+function readOptionalJson(file) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch (e) {
+    if (e.code === 'ENOENT' || e instanceof SyntaxError) return null;
+    throw e;
+  }
+}
+
+function containsPath(parent, child) {
+  const rel = path.relative(path.resolve(parent), path.resolve(child));
+  return !rel || (rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel));
+}
+
+function usageGuardSession() {
+  let names;
+  try { names = fs.readdirSync(USAGE_GUARD_SESSIONS).filter((name) => name.endsWith('.json')); }
+  catch (e) {
+    if (e.code === 'ENOENT') return null;
+    throw e;
+  }
+  const now = Date.now();
+  const matches = [];
+  for (const name of names) {
+    const s = readOptionalJson(path.join(USAGE_GUARD_SESSIONS, name));
+    if (!s || typeof s.id !== 'string' || !s.root) continue;
+    if (!roots().some((root) => containsPath(root, s.root) || containsPath(s.root, root))) continue;
+    const seenAt = Math.max(s.seenAt || 0, s.guardSeenAt || 0, s.stoppedAt || 0);
+    if (now - seenAt > 30 * 3600e3) continue;
+    matches.push({ ...s, seenAt });
+  }
+  return matches.sort((a, b) => b.seenAt - a.seenAt)[0] || null;
+}
+
+function usageGuardKey(e) {
+  return e.guardKey && e.session + '|' + e.guardKey;
+}
+
+function emitUsageGuard(sessionId, windowId, guardKey, stage, label, detail) {
+  if (events.some((e) => e.ev === 'UsageGuard' && usageGuardKey(e) === sessionId + '|' + guardKey)) return;
+  const e = {
+    id: ++seq, t: Date.now(), ev: 'UsageGuard', session: sessionId,
+    guardWindow: windowId, guardKey, guardStage: stage, guardLabel: label, detail, tool: 'Usage guard', action: 'guard',
+  };
+  events.push(e);
+  if (events.length > MAX_EVENTS) events = events.slice(-MAX_EVENTS);
+  persist(e);
+  post({ type: 'event', event: e });
+}
+
+function pollUsageGuard() {
+  try {
+    const state = readOptionalJson(USAGE_GUARD_STATE);
+    const win = state && state.win;
+    const session = usageGuardSession();
+    if (!win || !session || !['normal', 'careful', 'stopped'].includes(win.stage)) return;
+    const percent = Number.isFinite(win.est) ? Math.round(win.est) + '% used' : 'usage estimate unavailable';
+    const previous = [...events].reverse().find((e) => e.ev === 'UsageGuard' && e.session === session.id);
+    const windowId = String(win.id || win.resetsAt || 'current');
+    if (win.stage === 'careful' || win.stage === 'stopped') {
+      const transitionAt = win.stage === 'careful' ? win.carefulSince : win.stoppedAt;
+      const detail = win.stage === 'careful'
+        ? percent + ' of the 5-hour limit; use small steps'
+        : percent + ' of the 5-hour limit; hand-off required until reset';
+      emitUsageGuard(session.id, windowId, win.stage + ':' + windowId + ':' + (transitionAt || win.stage),
+        win.stage, win.stage === 'careful' ? 'Careful mode' : 'Limit reached', detail);
+    } else if (previous && previous.guardStage !== 'normal' && previous.guardWindow !== windowId) {
+      emitUsageGuard(session.id, windowId, 'resumed:' + windowId, 'resumed', 'Usage window reset', 'Normal mode resumed');
+    }
+
+    if (win.stage !== 'normal') {
+      const handoffKey = 'handoff:' + (session.stoppedAt || '');
+      if (session.handedOffAt) {
+        emitUsageGuard(session.id, windowId, handoffKey, 'handoff', 'Hand-off saved', 'Session will resume after the usage reset');
+      }
+    }
+
+    const resumed = readOptionalJson(USAGE_GUARD_RECORDS);
+    const record = resumed && resumed[session.id];
+    if (record && record.resumedAt) {
+      emitUsageGuard(session.id, windowId, 'background-resumed:' + record.stoppedAt, 'resumed', 'Background session resumed', 'Usage limit reset');
+    }
+  } catch (e) {
+    if (Date.now() - usageGuardErrorAt > 60e3) {
+      usageGuardErrorAt = Date.now();
+      console.error('Claude Graph could not read local usage-guard state:', e);
+    }
+  }
+}
+
 // ---------- editor highlights ----------
 
 function addHighlight(abs, ranges) {
@@ -497,7 +597,7 @@ function html(webview) {
     <div id="empty">
       <p class="big">Waiting for Claude Code</p>
       <p id="emptyHint"></p>
-      <p><button id="demo">Play a demo</button> <button id="parallelDemo">Parallel agents demo</button></p>
+      <p><button id="demo">Play a demo</button> <button id="parallelDemo">Parallel agents demo</button> <button id="usageGuardDemo">Full usage guard demo</button></p>
     </div>
     <div id="tip" hidden></div>
     <div id="legend"></div>
@@ -553,8 +653,10 @@ function attach(webview, onGone) {
       vscode.commands.executeCommand('claudeGraph.installHooks');
     } else if (m.type === 'clear') {
       vscode.commands.executeCommand('claudeGraph.clear');
-    } else if (m.type === 'demo' || m.type === 'parallelDemo') {
-      vscode.commands.executeCommand(m.type === 'parallelDemo' ? 'claudeGraph.parallelDemo' : 'claudeGraph.demo');
+    } else if (m.type === 'demo' || m.type === 'parallelDemo' || m.type === 'usageGuardDemo') {
+      const command = m.type === 'parallelDemo' ? 'claudeGraph.parallelDemo'
+        : m.type === 'usageGuardDemo' ? 'claudeGraph.usageGuardDemo' : 'claudeGraph.demo';
+      vscode.commands.executeCommand(command);
     } else if (m.type === 'update') {
       vscode.commands.executeCommand('claudeGraph.update');
     }
@@ -875,6 +977,59 @@ function parallelDemoEvents() {
   ];
 }
 
+function usageGuardDemoEvents() {
+  const s = 'usage-guard-demo-session';
+  const root = workspaceRoot() || '/project';
+  const f = (p) => path.join(root, p);
+  const pre = (tool, tool_input, extra = {}) => ({ hook_event_name: 'PreToolUse', session_id: s, tool_name: tool, tool_input, ...extra });
+  const post = (tool, tool_input, extra = {}) => ({ hook_event_name: 'PostToolUse', session_id: s, tool_name: tool, tool_input, ...extra });
+  const failed = (tool, tool_input, error) => ({
+    hook_event_name: 'PostToolUseFailure', session_id: s, tool_name: tool, tool_input, error,
+  });
+  const guard = (stage, label, detail, pause = 0) => ({
+    hook_event_name: 'UsageGuard', session_id: s, guard_stage: stage, guard_label: label, guard_detail: detail, _pause: pause,
+  });
+  return [
+    { hook_event_name: 'SessionStart', session_id: s },
+    { hook_event_name: 'UserPromptSubmit', session_id: s, prompt: 'Add request validation, update the tests, and run the full checks. If the usage guard pauses work, leave a safe hand-off and finish after reset.' },
+    guard('normal', 'Normal mode', 'Usage window has headroom; work can proceed', 900),
+    pre('Read', { file_path: f('package.json') }),
+    post('Read', { file_path: f('package.json') }),
+    pre('Read', { file_path: f('src/server.ts') }),
+    post('Read', { file_path: f('src/server.ts') }),
+    pre('Read', { file_path: f('tests/server.test.ts') }),
+    post('Read', { file_path: f('tests/server.test.ts') }),
+    pre('Edit', { file_path: f('src/server.ts') }, { _ranges: [{ start: 41, end: 48, symbol: 'createApp' }] }),
+    post('Edit', { file_path: f('src/server.ts') }, { _ranges: [{ start: 41, end: 52, symbol: 'createApp' }] }),
+    pre('Edit', { file_path: f('tests/server.test.ts') }, { _ranges: [{ start: 18, end: 30, symbol: 'request validation' }] }),
+    post('Edit', { file_path: f('tests/server.test.ts') }, { _ranges: [{ start: 18, end: 38, symbol: 'request validation' }] }),
+    pre('Bash', { command: 'npm test' }),
+    failed('Bash', { command: 'npm test' }, '1 test failed: invalid payload returned 500 instead of 400'),
+    pre('Edit', { file_path: f('src/server.ts') }, { _ranges: [{ start: 49, end: 52, symbol: 'createApp' }] }),
+    post('Edit', { file_path: f('src/server.ts') }, { _ranges: [{ start: 49, end: 54, symbol: 'createApp' }] }),
+    pre('Bash', { command: 'npm test' }),
+    post('Bash', { command: 'npm test' }),
+    guard('careful', 'Careful mode', 'About 82% of the 5-hour window used; finish focused work and avoid unnecessary tools', 1400),
+    pre('Read', { file_path: f('README.md') }),
+    post('Read', { file_path: f('README.md') }),
+    guard('stopped', 'Limit reached', 'About 98% used; new work is paused until the usage window resets', 1800),
+    guard('handoff', 'Hand-off saved', 'Checkpoint preserves the request, changed files, test result, and next verification step', 1500),
+    { hook_event_name: 'Stop', session_id: s, last_assistant_message: 'The guard reached the limit. Work and test results are saved safely; I will resume verification after the usage window resets.' },
+    guard('resumed', 'Usage window reset', 'Fresh window available; restoring the saved task and continuing verification', 1500),
+    pre('Read', { file_path: f('src/server.ts') }),
+    post('Read', { file_path: f('src/server.ts') }),
+    pre('Read', { file_path: f('tests/server.test.ts') }),
+    post('Read', { file_path: f('tests/server.test.ts') }),
+    pre('Bash', { command: 'git diff --check' }),
+    post('Bash', { command: 'git diff --check' }),
+    pre('Bash', { command: 'npm test' }),
+    post('Bash', { command: 'npm test' }),
+    pre('Bash', { command: 'npm run lint' }),
+    post('Bash', { command: 'npm run lint' }),
+    { hook_event_name: 'Stop', session_id: s, last_assistant_message: 'Resumed from the saved hand-off. Request validation is implemented, the regression test passes, git diff --check is clean, and lint and the full test suite pass.' },
+  ];
+}
+
 function playDemo() {
   demoTimers.forEach(clearTimeout);
   demoTimers = [];
@@ -892,6 +1047,17 @@ function playParallelDemo() {
   if (!views.size) showDefault();
   let at = 500;
   for (const raw of parallelDemoEvents()) {
+    demoTimers.push(setTimeout(() => enqueue({ ...raw, _demo: true }), at));
+    at += 450 + (raw._pause || 0);
+  }
+}
+
+function playUsageGuardDemo() {
+  demoTimers.forEach(clearTimeout);
+  demoTimers = [];
+  if (!views.size) showDefault();
+  let at = 500;
+  for (const raw of usageGuardDemoEvents()) {
     demoTimers.push(setTimeout(() => enqueue({ ...raw, _demo: true }), at));
     at += 450 + (raw._pause || 0);
   }
@@ -930,6 +1096,7 @@ async function activate(ctx) {
     vscode.commands.registerCommand('claudeGraph.showTab', showPanel),
     vscode.commands.registerCommand('claudeGraph.demo', playDemo),
     vscode.commands.registerCommand('claudeGraph.parallelDemo', playParallelDemo),
+    vscode.commands.registerCommand('claudeGraph.usageGuardDemo', playUsageGuardDemo),
     vscode.commands.registerCommand('claudeGraph.update', updateExtension),
     vscode.commands.registerCommand('claudeGraph.clear', () => {
       events = [];
@@ -960,7 +1127,7 @@ async function activate(ctx) {
       postState();
       updateStatus();
     }),
-    { dispose: () => { if (server) server.close(); clearTimeout(highlightTimer); clearTimeout(updateTimer); if (updateWatcher) updateWatcher.close(); demoTimers.forEach(clearTimeout); } },
+    { dispose: () => { if (server) server.close(); clearTimeout(highlightTimer); clearTimeout(updateTimer); clearInterval(usageGuardTimer); if (updateWatcher) updateWatcher.close(); demoTimers.forEach(clearTimeout); } },
   );
 
   if (ctx.storageUri) {
@@ -983,6 +1150,8 @@ async function activate(ctx) {
     vscode.window.showErrorMessage(`Claude Graph could not start: ${e.message}`);
   }
   updateStatus();
+  pollUsageGuard();
+  usageGuardTimer = setInterval(pollUsageGuard, 2500);
 
   // coming back to the window (for example after downloading a new file) is a good moment to look
   if (vscode.window.onDidChangeWindowState) {
@@ -995,4 +1164,8 @@ function deactivate() {
   if (server) server.close();
 }
 
-module.exports = { activate, deactivate, _test: { findUpdate, checkForUpdate, locate, heuristicSymbol, classify, stripOurHooks, isOurHook } };
+module.exports = {
+  activate,
+  deactivate,
+  _test: { findUpdate, checkForUpdate, locate, heuristicSymbol, classify, stripOurHooks, isOurHook, pollUsageGuard, usageGuardEvents: () => events, usageGuardDemoEvents },
+};

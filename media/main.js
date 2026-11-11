@@ -143,6 +143,9 @@
       case 'SessionEnd':
         session.status = 'done';
         break;
+      case 'UsageGuard':
+        addFeed(e, session, 'Usage guard', e.guardLabel || 'status', e.detail || '', null, 'guard', 'Guard');
+        break;
       case 'PermissionRequest':
         addFeed(e, actor, who, 'needs your approval:', (KIND[e.action] || e.tool || '') + ' ' + (e.file || e.detail || ''), null, 'wait');
         break;
@@ -221,7 +224,7 @@
   const flowEl = $('flow');
   const flowGrid = $('flowGrid');
   const SVGNS = 'http://www.w3.org/2000/svg';
-  const KIND = { read: 'Read', edit: 'Edit', write: 'Write', run: 'Shell', search: 'Search', web: 'Web', spawn: 'Start agent', mcp: 'Connector', plan: 'Propose plan', tasks: 'Task list' };
+  const KIND = { read: 'Read', edit: 'Edit', write: 'Write', run: 'Shell', search: 'Search', web: 'Web', spawn: 'Start agent', mcp: 'Connector', plan: 'Propose plan', tasks: 'Task list', guard: 'Usage guard' };
   const SNAKE = '<svg class="snake" aria-hidden="true"><rect class="trail" pathLength="100"/><rect class="body" pathLength="100"/><rect class="tip" pathLength="100"/></svg>';
   let turns = [];                 // one section per request, oldest first
   let turnBySession = new Map();  // session id -> its latest turn
@@ -524,6 +527,11 @@
       const L = flowLane(session, e.session);
       setCurrent(L, L.boxes[0]);
       made = L.boxes[0];
+    } else if (e.ev === 'UsageGuard') {
+      if (e.guardStage === 'resumed') newTurn(e.session, 'Usage guard resumed session');
+      const L = flowLane(session, e.session);
+      made = flowBox(L, 'k-guard ' + (e.guardStage || 'careful'), 'Usage guard',
+        (e.guardLabel || 'Status') + (e.detail ? ': ' + e.detail : ''));
     } else if (e.ev === 'SubagentStart') {
       made = flowLane(actor, e.session).boxes[0];
     } else if (e.ev === 'SubagentStop' || e.ev === 'Stop') {
@@ -810,7 +818,7 @@
   }
 
   // ---------- feed ----------
-  const CAT_ORDER = ['Read', 'Edit', 'Shell', 'Search', 'Web', 'Agents', 'Connector', 'Other'];
+  const CAT_ORDER = ['Read', 'Edit', 'Shell', 'Search', 'Web', 'Agents', 'Guard', 'Connector', 'Other'];
 
   function row(e, who, what, target, open, cls, withWho) {
     const li = document.createElement('li');
@@ -1266,6 +1274,7 @@
   $('connect').addEventListener('click', () => vscode.postMessage({ type: 'connect' }));
   $('demo').addEventListener('click', () => vscode.postMessage({ type: 'demo' }));
   $('parallelDemo').addEventListener('click', () => vscode.postMessage({ type: 'parallelDemo' }));
+  $('usageGuardDemo').addEventListener('click', () => vscode.postMessage({ type: 'usageGuardDemo' }));
   $('update').addEventListener('click', () => vscode.postMessage({ type: 'update' }));
 
   // ---------- messages from the extension ----------

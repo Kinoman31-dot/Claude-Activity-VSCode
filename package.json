@@ -2,7 +2,7 @@
   "name": "claude-activity-graph",
   "displayName": "Activity Graph for Claude Code",
   "description": "Live graph of what Claude Code is doing in this workspace: agents, tools, files and the code sections being edited. Unofficial.",
-  "version": "0.9.8",
+  "version": "0.9.10",
   "publisher": "local",
   "license": "MIT",
   "icon": "icon.png",
@@ -58,6 +58,10 @@
       {
         "command": "claudeGraph.parallelDemo",
         "title": "Claude Graph: Play Parallel Agents Demo"
+      },
+      {
+        "command": "claudeGraph.usageGuardDemo",
+        "title": "Claude Graph: Play Full Usage Guard Demo"
       },
       {
         "command": "claudeGraph.update",

@@ -115,6 +115,11 @@ main { flex: 1; display: flex; min-height: 0; }
 .box.k-run { --accent: var(--vscode-charts-orange); }
 .box.k-search, .box.k-web { --accent: var(--vscode-charts-yellow); }
 .box.k-spawn, .box.k-plan, .box.k-tasks { --accent: var(--vscode-charts-purple); }
+.box.k-guard { --accent: var(--vscode-charts-yellow); }
+.box.k-guard.normal { --accent: var(--vscode-charts-green); }
+.box.k-guard.stopped { --accent: var(--vscode-charts-red); }
+.box.k-guard.handoff { --accent: var(--vscode-charts-orange); }
+.box.k-guard.resumed { --accent: var(--vscode-charts-green); }
 .box.head, .box.term { --r: 21px; border-left-width: 1px; align-items: center; text-align: center; padding: 6px 16px 7px; }
 .box.head .top, .box.term .top { justify-content: center; }
 .box.head .text, .box.term .text { max-width: 100%; }
@@ -255,6 +260,7 @@ button.seg.on { color: var(--vscode-foreground); background: var(--vscode-toolba
 .group li.link:hover { background: var(--vscode-list-hoverBackground); }
 .group li.link .target { color: var(--vscode-textLink-foreground); }
 .group li.fail .what { color: var(--vscode-charts-red); }
+.group li.guard .what, #feed li.guard .what { color: var(--vscode-charts-yellow); }
 .group li.note { color: var(--vscode-descriptionForeground); }
 .group time { color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; font-size: .85em; margin-right: 8px; opacity: .8; }
 .group .what { color: var(--vscode-descriptionForeground); }
