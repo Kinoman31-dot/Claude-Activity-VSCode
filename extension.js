@@ -399,6 +399,8 @@ async function handleRaw(raw) {
     else if (action === 'spawn') {
       e.detail = short(input.description || input.prompt, 100);
       e.subagentType = input.subagent_type || null;
+      // the model Claude Code was asked to run the agent on (haiku, sonnet, opus...), when it was given
+      e.model = typeof input.model === 'string' && input.model ? short(input.model, 30) : null;
     } else if (action === 'plan') {
       if (typeof input.plan === 'string' && input.plan.trim()) {
         e.plan = input.plan.slice(0, 12000);
