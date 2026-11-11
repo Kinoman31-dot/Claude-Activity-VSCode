@@ -648,6 +648,10 @@ function post(msg) {
   for (const w of views) w.postMessage(msg);
 }
 
+function postInit(webview) {
+  webview.postMessage({ type: 'init', events });
+}
+
 function options() {
   const cfg = vscode.workspace.getConfiguration('claudeGraph');
   return {
@@ -680,7 +684,7 @@ function attach(webview, onGone) {
   webview.onDidReceiveMessage((m) => {
     if (!m || typeof m.type !== 'string') return;
     if (m.type === 'ready') {
-      webview.postMessage({ type: 'init', events });
+      postInit(webview);
       postState();
     } else if (m.type === 'open' && typeof m.file === 'string') {
       openFile(m.file, Number(m.line) || 0);
@@ -703,6 +707,9 @@ function attach(webview, onGone) {
 const dockedProvider = {
   resolveWebviewView(view) {
     attach(view.webview, (cb) => view.onDidDispose(cb));
+    view.onDidChangeVisibility(() => {
+      if (view.visible) postInit(view.webview);
+    });
   },
 };
 
@@ -720,13 +727,17 @@ function showPanel() {
     panel.reveal(undefined, true);
     return;
   }
-  panel = vscode.window.createWebviewPanel('claudeGraph', 'Claude Activity', { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true }, {
+  const created = vscode.window.createWebviewPanel('claudeGraph', 'Claude Activity', { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true }, {
     enableScripts: true,
     retainContextWhenHidden: true,
     localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'media')],
   });
-  panel.iconPath = vscode.Uri.joinPath(context.extensionUri, 'icon.png');
-  attach(panel.webview, (cb) => panel.onDidDispose(() => { panel = null; cb(); }));
+  panel = created;
+  created.iconPath = vscode.Uri.joinPath(context.extensionUri, 'icon.png');
+  attach(created.webview, (cb) => created.onDidDispose(() => { panel = null; cb(); }));
+  created.onDidChangeViewState((e) => {
+    if (e.webviewPanel.active) postInit(e.webviewPanel.webview);
+  });
 }
 
 async function openFile(file, line) {
