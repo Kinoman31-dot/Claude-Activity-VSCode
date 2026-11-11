@@ -30,13 +30,13 @@ Click a file, a code section or an activity line to open it at the right line. L
 
 ## Install
 
-1. In VS Code: Extensions panel > `...` menu > **Install from VSIX...** and choose `claude-activity-graph-0.9.14.vsix`.
+1. In VS Code: Extensions panel > `...` menu > **Install from VSIX...** and choose `claude-activity-graph-0.9.15.vsix`.
 2. Open your project folder.
 3. Click **Claude Graph** in the status bar (bottom right), or the graph icon at the top right of any editor. The chart opens as an editor tab beside your code, like a Claude Code session; drag the tab wherever you want it. A docked copy is also available in the bottom panel as **Claude Activity** (set `claudeGraph.openIn` to `panel` to make that the default).
 4. Click **Connect this workspace**.
 5. Start Claude Code in that folder and give it a task. If a session was already running and nothing appears, restart it.
 
-**Play a demo** shows a sample run without Claude Code. **Parallel agents demo** is a separate example with three agents working at once; Claude integrates their work and runs `npm test` after all three finish. **Full usage guard demo** shows a complete task: normal work, careful mode, a failed test and fix, a limit stop, saved hand-off, usage-window reset, resume, and final checks. Demos are simulated, do not change project files or wait for a real usage reset, and are not restored when a new Activity view opens. Start these from their buttons or the matching **Claude Graph: Play … Demo** commands in the Command Palette.
+**Play a demo** shows a sample run without Claude Code. **Parallel agents demo** is a separate example with three agents working at once; Claude integrates their work and runs `npm test` after all three finish. **Full usage guard demo** shows a complete task: normal work, careful mode, a failed test and fix, a limit stop, saved hand-off, usage-window reset, resume, and final checks. Demos are simulated, do not change project files or wait for a real usage reset, and remain visible until cleared, replaced by another demo, or VS Code restarts. They are not saved to disk. Start these from their buttons or the matching **Claude Graph: Play … Demo** commands in the Command Palette.
 
 ## Several sessions and folders
 
