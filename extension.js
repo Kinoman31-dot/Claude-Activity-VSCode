@@ -16,6 +16,7 @@ const HOOK_EVENTS = [
 const MAX_EVENTS = 3000;
 const MAX_BODY = 25 * 1024 * 1024;
 const MAX_FILE = 2 * 1024 * 1024;
+const DEMO_SESSIONS = new Set(['demo-session', 'parallel-demo-session', 'usage-guard-demo-session']);
 const USAGE_GUARD_DIR = process.env.USAGE_GUARD_DIR || path.join(os.homedir(), '.claude-usage-guard');
 const USAGE_GUARD_STATE = path.join(USAGE_GUARD_DIR, 'state.json');
 const USAGE_GUARD_SESSIONS = path.join(USAGE_GUARD_DIR, 'sessions');
@@ -348,6 +349,7 @@ async function handleRaw(raw) {
     toolUseId: raw.tool_use_id || null,
     action,
   };
+  if (raw._demo) e.demo = true;
   if (ev === 'UserPromptSubmit') e.detail = short(raw.prompt, 140);
   if (ev === 'PostToolUseFailure') e.error = short(raw.error, 140);
   if (ev === 'Stop' || ev === 'SubagentStop') e.detail = short(raw.last_assistant_message, 420);
@@ -424,16 +426,25 @@ function persist(e) {
   fs.appendFile(storeFile, JSON.stringify(e) + '\n', () => {});
 }
 
+function isDemoEvent(e) {
+  return !!e && (e.demo === true || DEMO_SESSIONS.has(e.session));
+}
+
 function loadHistory() {
   if (!storeFile) return;
   try {
     if (!fs.existsSync(storeFile)) return;
     const lines = fs.readFileSync(storeFile, 'utf8').split('\n').filter(Boolean);
-    const kept = lines.slice(-MAX_EVENTS);
-    events = [];
-    for (const line of kept) { try { events.push(JSON.parse(line)); } catch (e) { /* skip a damaged line */ } }
+    const loaded = [];
+    for (const line of lines) {
+      try {
+        const event = JSON.parse(line);
+        if (!isDemoEvent(event)) loaded.push(event);
+      } catch (e) { /* skip a damaged line */ }
+    }
+    events = loaded.slice(-MAX_EVENTS);
     seq = events.reduce((m, e) => Math.max(m, e.id || 0), 0);
-    if (lines.length > MAX_EVENTS) fs.writeFileSync(storeFile, kept.join('\n') + '\n');
+    if (events.length !== lines.length) fs.writeFileSync(storeFile, events.map((e) => JSON.stringify(e)).join('\n') + '\n');
   } catch (e) { events = []; }
 }
 
@@ -1030,37 +1041,31 @@ function usageGuardDemoEvents() {
   ];
 }
 
-function playDemo() {
+function playDemoEvents(demoEvents) {
   demoTimers.forEach(clearTimeout);
   demoTimers = [];
+  events = events.filter((e) => !isDemoEvent(e));
   if (!views.size) showDefault();
   let at = 500;
-  for (const raw of demoEvents()) {
+  for (const raw of demoEvents) {
     demoTimers.push(setTimeout(() => enqueue({ ...raw, _demo: true }), at));
     at += 450 + (raw._pause || 0);
   }
+  demoTimers.push(setTimeout(() => {
+    queue = queue.then(() => { events = events.filter((e) => !isDemoEvent(e)); });
+  }, at));
+}
+
+function playDemo() {
+  playDemoEvents(demoEvents());
 }
 
 function playParallelDemo() {
-  demoTimers.forEach(clearTimeout);
-  demoTimers = [];
-  if (!views.size) showDefault();
-  let at = 500;
-  for (const raw of parallelDemoEvents()) {
-    demoTimers.push(setTimeout(() => enqueue({ ...raw, _demo: true }), at));
-    at += 450 + (raw._pause || 0);
-  }
+  playDemoEvents(parallelDemoEvents());
 }
 
 function playUsageGuardDemo() {
-  demoTimers.forEach(clearTimeout);
-  demoTimers = [];
-  if (!views.size) showDefault();
-  let at = 500;
-  for (const raw of usageGuardDemoEvents()) {
-    demoTimers.push(setTimeout(() => enqueue({ ...raw, _demo: true }), at));
-    at += 450 + (raw._pause || 0);
-  }
+  playDemoEvents(usageGuardDemoEvents());
 }
 
 // ---------- activation ----------
