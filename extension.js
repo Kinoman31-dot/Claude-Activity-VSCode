@@ -215,7 +215,31 @@ function relPath(abs, cwd) {
       return (rs.length > 1 ? path.basename(r) + '/' : '') + rel.split(path.sep).join('/');
     }
   }
-  return abs;
+  // outside the workspace: the last two parts are enough to recognise the file
+  const parts = abs.split(/[\\/]/).filter(Boolean);
+  return parts.length > 2 ? '…/' + parts.slice(-2).join('/') : abs;
+}
+
+// A shell command without the "cd <folder> &&" that Claude Code often puts in front of it.
+function cleanCommand(cmd) {
+  if (typeof cmd !== 'string') return '';
+  return cmd.replace(/^\s*cd\s+("[^"]*"|'[^']*'|\S+)\s*(&&|;)\s*/, '');
+}
+
+// "mcp__server__tool_name" reads better as "server: tool name".
+function mcpName(tool) {
+  const parts = String(tool).split('__').filter(Boolean).slice(1);
+  if (!parts.length) return tool;
+  const name = (s) => s.replace(/[_-]+/g, ' ').trim();
+  return parts.length > 1 ? name(parts[0]) + ': ' + name(parts.slice(1).join(' ')) : name(parts[0]);
+}
+
+// What a tool with no category of its own was used for, when its input says so.
+function otherDetail(tool, input) {
+  if (tool === 'Skill' && input.skill) return short(String(input.skill).replace(/^.*:/, ''), 80);
+  if (tool === 'ToolSearch' && input.query) return short(String(input.query).replace(/^select:/, ''), 80);
+  if (tool === 'AskUserQuestion' && Array.isArray(input.questions) && input.questions[0]) return short(input.questions[0].question, 120);
+  return tool;
 }
 
 function clip(text) {
@@ -344,7 +368,7 @@ async function handleRaw(raw) {
   };
   if (ev === 'UserPromptSubmit') e.detail = short(raw.prompt, 140);
   if (ev === 'PostToolUseFailure') e.error = short(raw.error, 140);
-  if (ev === 'Stop' || ev === 'SubagentStop') e.detail = short(raw.last_assistant_message, 420);
+  if (ev === 'Stop' || ev === 'SubagentStop') e.detail = short(raw.last_assistant_message, ev === 'Stop' ? 900 : 420);
   if (ev === 'Notification') { e.detail = short(raw.message, 160); e.ntype = raw.notification_type || null; }
 
   if (action) {
@@ -364,7 +388,12 @@ async function handleRaw(raw) {
     if (ev === 'PreToolUse' && action === 'write' && typeof input.content === 'string') {
       e.lines = input.content.split('\n').length;
     }
-    if (action === 'run') e.detail = short(input.command, 140);
+    if (action === 'run') {
+      // the plain-words description when Claude Code gives one; the command itself goes in the tooltip
+      const cmd = cleanCommand(input.command);
+      e.detail = short(input.description || cmd, 140);
+      if (input.description && cmd) e.cmd = short(cmd, 400);
+    }
     else if (action === 'search') e.detail = short(input.pattern || input.path, 100);
     else if (action === 'web') e.detail = short(input.query || input.url, 120);
     else if (action === 'spawn') {
@@ -389,7 +418,8 @@ async function handleRaw(raw) {
         e.task = { id: input.taskId != null ? String(input.taskId) : null, status: input.status || null, subject: input.subject ? short(input.subject, 160) : null };
         e.detail = 'task ' + (e.task.id || '') + (e.task.status ? ': ' + String(e.task.status).replace('_', ' ') : '');
       } else e.detail = raw.tool_name;
-    } else if (action === 'mcp' || action === 'other') e.detail = raw.tool_name;
+    } else if (action === 'mcp') e.detail = mcpName(raw.tool_name);
+    else if (action === 'other') e.detail = otherDetail(raw.tool_name, input);
   }
 
   events.push(e);
@@ -484,6 +514,7 @@ function html(webview) {
   <button id="viewFlow" class="seg" title="One box per action, in order">Flowchart</button><button id="viewGraph" class="seg" title="Agents, files and code sections as a network">Graph</button><button id="viewPlan" class="seg" title="The proposed plan and task list as a flowchart">Plan</button><button id="align" class="seg gap" title="Line boxes up across agents in the order they happened. Leaves gaps, but shows what ran at the same time.">Align by time</button>
   <span class="spacer"></span>
   <button id="connect" class="primary" hidden>Connect this workspace</button>
+  <button id="toggleAside" class="seg" title="Show or hide the activity list on the right">Activity</button>
   <button id="replay" title="Play the whole session again from the start">Replay</button>
   <button id="update" title="Install a newer version of this extension from a .vsix file">Update</button>
   <button id="fit" title="Fit the graph to the panel">Fit</button>
