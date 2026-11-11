@@ -30,7 +30,7 @@ Click a file, a code section or an activity line to open it at the right line. L
 
 ## Install
 
-1. In VS Code: Extensions panel > `...` menu > **Install from VSIX...** and choose `claude-activity-graph-0.9.11.vsix`.
+1. In VS Code: Extensions panel > `...` menu > **Install from VSIX...** and choose `claude-activity-graph-0.9.12.vsix`.
 2. Open your project folder.
 3. Click **Claude Graph** in the status bar (bottom right), or the graph icon at the top right of any editor. The chart opens as an editor tab beside your code, like a Claude Code session; drag the tab wherever you want it. A docked copy is also available in the bottom panel as **Claude Activity** (set `claudeGraph.openIn` to `panel` to make that the default).
 4. Click **Connect this workspace**.

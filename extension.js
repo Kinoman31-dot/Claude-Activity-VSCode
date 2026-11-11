@@ -1052,7 +1052,10 @@ function playDemoEvents(demoEvents) {
     at += 450 + (raw._pause || 0);
   }
   demoTimers.push(setTimeout(() => {
-    queue = queue.then(() => { events = events.filter((e) => !isDemoEvent(e)); });
+    queue = queue.then(() => {
+      events = events.filter((e) => !isDemoEvent(e));
+      post({ type: 'init', events });
+    });
   }, at));
 }
 
