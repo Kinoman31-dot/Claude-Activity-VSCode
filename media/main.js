@@ -39,6 +39,19 @@
   const TOOL_LABEL = { run: 'Shell', search: 'Search', web: 'Web', mcp: 'Connector', other: 'Other', spawn: 'Agents', plan: 'Plan', tasks: 'Tasks' };
   const VERB = { read: 'read', edit: 'editing', write: 'writing', run: 'ran', search: 'searched', web: 'web', spawn: 'started agent', mcp: 'used', other: 'used', plan: 'proposed a plan:', tasks: 'task list,' };
   const REST = { spawn: 175, read: 125, edit: 120, section: 48 };
+  // friendlier names for tools that have no category of their own
+  const NICE = { EnterPlanMode: 'Plan mode', ToolSearch: 'Tool lookup', AskUserQuestion: 'Question', SubagentHandback: 'Report back', Skill: 'Skill' };
+  // "Prompts" that Claude Code sends itself (a sub-agent's report, a background task finishing) are not requests from you.
+  const AUTO_RE = /^\s*<(agent-message|task-notification|system-reminder|local-command)/;
+  function tidyFile(f) {
+    if (!f || !/^([A-Za-z]:[\\/]|\/)/.test(f)) return f || '';
+    const parts = f.split(/[\\/]/).filter(Boolean);
+    return parts.length > 2 ? '…/' + parts.slice(-2).join('/') : f;
+  }
+  function tidyCmd(c) { return (c || '').replace(/^\s*cd\s+("[^"]*"|'[^']*'|\S+)\s*(&&|;)\s*/, ''); }
+  function promptText(d) { return (d || '').replace(/<[/]?pasted_content[^>]*>/g, '').trim() || 'Pasted text'; }
+  function isAuto(e) { return e.ev === 'UserPromptSubmit' && AUTO_RE.test(e.detail || ''); }
+  function autoLabel(e) { return /^\s*<agent-message/.test(e.detail || '') ? 'Sub-agent reported back' : 'Background update'; }
 
   function readTheme() {
     const cs = getComputedStyle(document.body);
@@ -114,7 +127,11 @@
 
   function basename(p) { const i = p.lastIndexOf('/'); return i >= 0 ? p.slice(i + 1) : p; }
 
+  // a session that only starts or ends, with no work in it, is not worth showing
+  function bare(e) { return e.ev === 'SessionStart' || e.ev === 'SessionEnd'; }
+
   function apply(e, live) {
+    if (bare(e) && !nodes.has('s:' + e.session)) return;
     const session = sessionNode(e);
     const actor = e.agentId ? agentNode(e, session) : session;
     const hot = live ? 1 : 0;
@@ -126,7 +143,8 @@
         break;
       case 'UserPromptSubmit':
         session.status = 'running'; session.heat = hot;
-        addFeed(e, session, 'You', 'sent a prompt', '', null, 'note');
+        if (isAuto(e)) addFeed(e, session, 'Claude', 'received:', autoLabel(e).toLowerCase(), null, 'note');
+        else addFeed(e, session, 'You', 'sent a prompt', '', null, 'note ask');
         break;
       case 'SubagentStart':
         actor.status = 'running'; actor.heat = hot;
@@ -164,7 +182,7 @@
           if (e.action !== 'read') f.edited = true;
           sections(e, f, live, false);
           actor.doing = VERB[e.action] + ' ' + f.label; actor.doingHeat = hot;
-          addFeed(e, actor, who, VERB[e.action], e.file, { file: e.abs, line: firstLine(e) }, '', e.action === 'read' ? 'Read' : 'Edit');
+          addFeed(e, actor, who, VERB[e.action], tidyFile(e.file), { file: e.abs, line: firstLine(e) }, '', e.action === 'read' ? 'Read' : 'Edit');
         } else {
           const name = TOOL_LABEL[e.action] || e.tool;
           actor.tools = actor.tools || {};
@@ -173,7 +191,11 @@
           actor.doingHeat = hot;
           // task-list bookkeeping is counted, not listed: the Plan view shows it properly
           if (e.action === 'tasks') noteCat(actor, name);
-          else addFeed(e, actor, who, VERB[e.action] || 'used', e.detail || e.tool || '', null, '', name);
+          else {
+            const nice = NICE[e.tool] || e.tool || '';
+            const target = e.action === 'other' && e.detail && e.detail !== e.tool ? nice + ': ' + e.detail : (e.action === 'other' ? nice : e.action === 'run' ? tidyCmd(e.detail) : e.detail || e.tool || '');
+            addFeed(e, actor, who, VERB[e.action] || 'used', target, null, '', name, e.cmd);
+          }
         }
         break;
       }
@@ -197,7 +219,7 @@
   }
 
   function fileNode(e, actor) {
-    const f = node('f:' + e.abs, 'file', basename(e.file), actor);
+    const f = node('f:' + e.abs, 'file', basename(tidyFile(e.file)), actor);
     f.path = e.file; f.abs = e.abs;
     return f;
   }
@@ -258,12 +280,13 @@
     const body = document.createElement('div'); body.className = 'turnBody';
     const svg = document.createElementNS(SVGNS, 'svg'); svg.setAttribute('class', 'lines');
     const grid = document.createElement('div'); grid.className = 'grid';
-    body.append(svg, grid);
+    const ans = document.createElement('div'); ans.className = 'answer'; ans.hidden = true;
+    body.append(svg, grid, ans);
     el.append(body);
     flowGrid.append(el);
     promptsEl.prepend(head);
     requestsEl.hidden = false;
-    const T = { el, head, meta, svg, grid, lanes: [], seq: 0, actions: 0, agents: 0, dirty: true, t0: 0, t1: 0 };
+    const T = { el, head, meta, svg, grid, ans, lanes: [], seq: 0, actions: 0, agents: 0, dirty: true, t0: 0, t1: 0 };
     head.addEventListener('click', () => {
       const folded = el.classList.toggle('folded');
       head.setAttribute('aria-expanded', String(!folded));
@@ -279,8 +302,12 @@
 
   function turnMeta(T) {
     const took = T.t0 && T.t1 > T.t0 ? fmtDur(T.t1 - T.t0) : '';
-    T.meta.textContent = T.actions + (T.actions === 1 ? ' action' : ' actions') +
-      (T.agents ? ', ' + T.agents + (T.agents === 1 ? ' sub-agent' : ' sub-agents') : '') + (took ? ', ' + took : '');
+    const quiet = !T.actions && !T.agents;   // Claude only answered; nothing to draw
+    T.el.classList.toggle('quiet', quiet); T.head.classList.toggle('quiet', quiet);
+    T.meta.textContent = '';
+    const parts = [quiet ? 'reply only' : T.actions + (T.actions === 1 ? ' action' : ' actions'),
+      T.agents ? T.agents + (T.agents === 1 ? ' sub-agent' : ' sub-agents') : '', took];
+    for (const p of parts) { if (!p) continue; const c = document.createElement('span'); c.textContent = p; T.meta.append(c); }
   }
 
   function fmtDur(ms) {
@@ -412,7 +439,7 @@
     const gk = e.action === 'spawn' ? null : e.action + (KIND[e.action] ? '' : ':' + e.tool);
     let b = L.boxes[L.boxes.length - 1];
     if (!(b && gk && opts.group && b.gk === gk)) {
-      b = flowBox(L, 'act k-' + e.action, KIND[e.action] || e.tool || 'Tool', '');
+      b = flowBox(L, 'act k-' + e.action, KIND[e.action] || NICE[e.tool] || e.tool || 'Tool', '');
       b.gk = gk;
       const box = b;
       b.el.addEventListener('click', (ev) => {
@@ -423,7 +450,9 @@
       b.el.addEventListener('mouseleave', hideTip);
     }
     const item = {
-      text: e.action === 'spawn' ? (e.subagentType ? e.subagentType + ': ' : '') + (e.detail || '') : (e.file || e.detail || ''),
+      text: e.action === 'spawn' ? (e.subagentType ? e.subagentType + ': ' : '') + (e.detail || '')
+        : e.action === 'other' && e.detail === e.tool && NICE[e.tool] ? '' : (e.file ? tidyFile(e.file) : e.action === 'run' ? tidyCmd(e.detail) : e.detail || ''),
+      more: e.cmd || '',
       file: e.abs || null, line: firstLine(e), fail: false, t0: e.t, t1: 0,
       sub: e.ranges && e.ranges.length && e.ranges[0].symbol ? e.ranges[0].symbol : (e.lines ? e.lines + ' lines' : ''),
       diff: e.diff && e.diff.length ? e.diff : null,
@@ -453,7 +482,7 @@
     const fails = b.items.filter((i) => i.fail).length;
     const open = b.expanded && n > 1;
     b.n.hidden = n < 2; b.n.textContent = '×' + n;
-    b.t.textContent = last.text; b.t.hidden = open;
+    b.t.textContent = last.text; b.t.hidden = open || !last.text;
     const sub = b.wait ? 'Waiting for your approval'
       : n === 1 ? last.sub : open ? '' : 'and ' + (n - 1) + ' more' + (fails ? ', ' + fails + ' failed' : '');
     b.sub.textContent = sub; b.sub.hidden = !sub;
@@ -462,7 +491,7 @@
     b.el.classList.toggle('open', open);
     b.el.classList.toggle('link', n > 1 || !!last.file || last.planLink);
     b.el.title = n > 1 ? (open ? 'Click to collapse' : 'Click to show all ' + n + ':\n' + b.items.map((i) => i.text).join('\n'))
-      : last.diff ? '' : b.kind + ' ' + last.text + (last.sub ? '\n' + last.sub : '') + (last.file ? '\nClick to open, Shift+click to show in the graph' : last.planLink ? '\nClick to see the plan as a flowchart' : '');
+      : last.diff ? '' : b.kind + ' ' + last.text + (last.more ? '\n' + last.more : '') + (last.sub ? '\n' + last.sub : '') + (last.file ? '\nClick to open, Shift+click to show in the graph' : last.planLink ? '\nClick to see the plan as a flowchart' : '');
     boxTime(b);
     b.list.hidden = !open;
     b.list.textContent = '';
@@ -477,7 +506,7 @@
         row.append(t, d);
         li.append(row);
         if (item.sub) { const s2 = document.createElement('span'); s2.className = 'sub'; s2.textContent = item.sub; li.append(s2); }
-        if (!item.diff) li.title = item.text + (item.sub ? '\n' + item.sub : '');
+        if (!item.diff) li.title = item.text + (item.more ? '\n' + item.more : '') + (item.sub ? '\n' + item.sub : '');
         li.addEventListener('click', (ev) => { ev.stopPropagation(); openItem(item, ev); });
         li.addEventListener('mouseenter', () => showDiff(li, item));
         li.addEventListener('mouseleave', hideTip);
@@ -521,8 +550,12 @@
   function flowApply(e, actor, session, live) {
     let made = null;
     if (replayClock) replayClock = e.t;
-    if (e.ev === 'UserPromptSubmit') {
-      const T = newTurn(e.session, e.detail || 'New request');
+    if (isAuto(e) && turnBySession.get(e.session)) {
+      const L = flowLane(session, e.session);
+      made = flowBox(L, 'term note', autoLabel(e), '');
+      setCurrent(L, made);
+    } else if (e.ev === 'UserPromptSubmit') {
+      const T = newTurn(e.session, isAuto(e) ? autoLabel(e) : promptText(e.detail));
       T.t0 = e.t;
       const L = flowLane(session, e.session);
       setCurrent(L, L.boxes[0]);
@@ -539,7 +572,14 @@
       clearWait(L);
       // anything this agent left open is over now
       for (const b of L.boxes) { let touched = false; for (const i of b.items) if (!i.t1) { i.t1 = i.t0; touched = true; } if (touched) boxTime(b); }
-      made = flowBox(L, 'term' + (e.detail ? ' said' : ''), e.ev === 'Stop' ? 'Finished the turn' : 'Finished', e.detail || '');
+      const mainStop = e.ev === 'Stop';
+      made = flowBox(L, 'term' + (e.detail && !mainStop ? ' said' : ''), mainStop ? 'Finished the turn' : 'Finished', mainStop ? '' : e.detail || '');
+      if (mainStop && e.detail) {
+        const A = L.turn.ans; A.textContent = '';
+        const h = document.createElement('b'); h.textContent = "Claude's answer";
+        const p = document.createElement('span'); p.textContent = e.detail;
+        A.append(h, p); A.hidden = false;
+      }
       setCurrent(L, null);
       if (e.ev === 'Stop') { L.turn.t1 = e.t; turnMeta(L.turn); }
     } else if (e.ev === 'PreToolUse' && e.action === 'tasks') {
@@ -869,13 +909,15 @@
     }
   }
 
-  function addFeed(e, actor, who, what, target, open, cls, cat) {
+  function addFeed(e, actor, who, what, target, open, cls, cat, more) {
     const li = row(e, who, what, target, open, cls, true);
+    if (more) li.title += '\n' + more;
     feed.prepend(li);
     while (feed.children.length > 250) feed.lastChild.remove();
 
     const g = group(actor);
     const li2 = row(e, who, what, target, open, cls, who === 'You');
+    if (more) li2.title += '\n' + more;
     g.list.prepend(li2);
     while (g.list.children.length > 120) g.list.lastChild.remove();
     if (cat) noteCat(actor, cat);
@@ -1073,9 +1115,10 @@
 
   // ---------- header and empty state ----------
   function refreshChrome() {
-    let agents = 0, files = 0, edited = 0;
+    let agents = 0, mains = 0, files = 0, edited = 0;
     for (const n of nodes.values()) {
       if (n.kind === 'agent' && n.status === 'running') agents++;
+      if (n.kind === 'main' && n.status === 'running') mains++;
       if (n.kind === 'file') { files++; if (n.edited) edited++; }
     }
     const st = $('status');
@@ -1085,7 +1128,8 @@
     st.textContent = waitingNow ? 'Waiting for your approval' : state.connected ? 'Connected' : 'Not connected';
     st.title = state.port ? 'Listening on 127.0.0.1:' + state.port : '';
     $('counts').textContent = nodes.size
-      ? agents + (agents === 1 ? ' agent running · ' : ' agents running · ') + files + (files === 1 ? ' file' : ' files') + ' · ' + edited + ' edited'
+      ? (mains || agents ? 'Claude is working' + (agents ? ' with ' + agents + (agents === 1 ? ' sub-agent' : ' sub-agents') : '') : 'Claude is idle') +
+        ' · ' + files + (files === 1 ? ' file' : ' files') + ' touched, ' + edited + ' edited'
       : '';
     for (const g of groups.values()) {
       const st = g.actor.status === 'running' ? 'working' : g.actor.status === 'done' ? 'finished' : 'idle';
@@ -1178,6 +1222,8 @@
     flowEl.hidden = !flowView; planEl.hidden = !planView; canvas.hidden = !graphView; $('legend').hidden = !graphView;
     $('viewFlow').classList.toggle('on', flowView); $('viewGraph').classList.toggle('on', graphView); $('viewPlan').classList.toggle('on', planView);
     $('fit').hidden = planView;
+    document.body.classList.toggle('noAside', ui.aside === false);
+    if ($('toggleAside')) $('toggleAside').classList.toggle('on', ui.aside !== false);
     $('align').hidden = !flowView; $('align').classList.toggle('on', !!ui.align);
     $('align').setAttribute('aria-pressed', String(!!ui.align));
     for (const T of turns) T.dirty = true;
@@ -1191,6 +1237,7 @@
   $('viewFlow').addEventListener('click', () => { ui.view = 'flow'; applyUi(); });
   $('viewGraph').addEventListener('click', () => { ui.view = 'graph'; applyUi(); });
   $('viewPlan').addEventListener('click', () => { ui.view = 'plan'; applyUi(); });
+  if ($('toggleAside')) $('toggleAside').addEventListener('click', () => { ui.aside = ui.aside === false; applyUi(); });
   $('align').addEventListener('click', () => { ui.align = !ui.align; applyUi(); });
 
   // ---------- sessions, rebuild and replay ----------
@@ -1203,10 +1250,11 @@
   function shown(e) { return !onlySession || e.session === onlySession; }
 
   function noteSession(e) {
+    if (bare(e) && !sessions.has(e.session)) return;
     let label = sessions.get(e.session);
     const fresh = label === undefined;
     if (fresh) label = '';
-    if (!label && e.ev === 'UserPromptSubmit' && e.detail) label = e.detail.length > 42 ? e.detail.slice(0, 41) + '…' : e.detail;
+    if (!label && e.ev === 'UserPromptSubmit' && e.detail && !isAuto(e)) label = e.detail.length > 42 ? e.detail.slice(0, 41) + '…' : e.detail;
     if (fresh || label !== sessions.get(e.session)) { sessions.set(e.session, label); fillPicker(); }
   }
 
