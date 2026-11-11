@@ -342,3 +342,15 @@ button.seg.on { color: var(--vscode-button-foreground); background: var(--vscode
 /* request titles live in the side list: let the figure chips wrap under the title */
 #prompts .turnHead { flex-wrap: wrap; }
 #prompts .turnHead .meta { flex-wrap: wrap; justify-content: flex-end; margin-left: auto; padding-left: 0; }
+
+/* sub-agent columns coloured by the model they run on */
+.box.head.m-haiku { --accent: var(--vscode-charts-green); }
+.box.head.m-sonnet { --accent: var(--vscode-charts-blue); }
+.box.head.m-opus { --accent: var(--vscode-charts-purple); }
+.box.head.m-fable { --accent: var(--vscode-charts-orange); }
+
+/* Claude's status box while sub-agents are still working */
+.box.term.gather { --accent: var(--vscode-charts-blue); border-style: dashed; }
+.box.term.gather .kind { color: var(--vscode-charts-blue); font-weight: 600; }
+.box.term .text { font-size: .9em; color: var(--vscode-descriptionForeground); }
+.box.term.said .text { font-size: .93em; color: var(--vscode-foreground); }

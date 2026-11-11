@@ -66,6 +66,10 @@
       section: v('--vscode-charts-yellow', '#cca700'),
       tool: v('--vscode-charts-orange', '#d18616'),
       err: v('--vscode-charts-red', '#f14c4c'),
+      'm-haiku': v('--vscode-charts-green', '#89d185'),
+      'm-sonnet': v('--vscode-charts-blue', '#3794ff'),
+      'm-opus': v('--vscode-charts-purple', '#b180d7'),
+      'm-fable': v('--vscode-charts-orange', '#d18616'),
       font: v('--vscode-font-family', 'sans-serif'),
     };
   }
@@ -117,13 +121,18 @@
     if (i < 0) i = pending.findIndex((p) => p.session === e.session);
     const req = i >= 0 ? pending.splice(i, 1)[0] : null;
     const parent = (req && nodes.get(req.caller)) || session;
-    n = node(id, 'agent', e.agentType || 'agent', parent);
+    const model = req && req.model ? req.model : null;
+    n = node(id, 'agent', (e.agentType || 'agent') + (model ? ' · ' + model : ''), parent);
+    n.model = model;
     n.info = req ? req.desc : '';
     n.spawnKey = req ? req.key : null;
     n.status = 'running';
     link(parent, n, 'spawn', true);
     return n;
   }
+
+  // haiku / sonnet / opus / fable, from an alias or a full model id
+  function modelFamily(m) { const x = String(m).toLowerCase().match(/haiku|sonnet|opus|fable/); return x ? x[0] : 'other'; }
 
   function basename(p) { const i = p.lastIndexOf('/'); return i >= 0 ? p.slice(i + 1) : p; }
 
@@ -171,8 +180,8 @@
         if (actor.kind === 'main') session.status = 'running';
         actor.heat = hot; actor.count++; actor.fail = 0;
         if (e.action === 'spawn') {
-          pending.push({ session: e.session, caller: actor.id, type: e.subagentType, desc: e.detail || '', key: feedKey(e) });
-          addFeed(e, actor, who, 'started agent', (e.subagentType ? e.subagentType + ': ' : '') + (e.detail || ''), null, '', 'Agents');
+          pending.push({ session: e.session, caller: actor.id, type: e.subagentType, desc: e.detail || '', key: feedKey(e), model: e.model || null });
+          addFeed(e, actor, who, e.model ? 'started ' + e.model + ' agent:' : 'started agent', (e.model || !e.subagentType ? '' : e.subagentType + ': ') + (e.detail || ''), null, '', 'Agents', e.subagentType ? 'Agent type: ' + e.subagentType : '');
           break; // the agent node itself appears on SubagentStart
         }
         if (e.file) {
@@ -321,18 +330,19 @@
   function flowLane(actor, sessionId) {
     const T = turnBySession.get(sessionId) || newTurn(sessionId, null);
     let L = lanes.get(actor.id);
-    if (!L) { L = { cur: null, waitBox: null }; lanes.set(actor.id, L); }
-    if (L.turn === T) return L;
-    // first box for this agent in this turn: give it a column and a header
-    setCurrent(L, null);
-    clearWait(L);
+    if (L && L.turn === T) return L;
+    // first box for this agent in this turn: a new column with a header. The column it had in an
+    // earlier turn stays as it was, so that turn can still be laid out again.
+    if (L) { setCurrent(L, null); clearWait(L); }
+    L = { cur: null, waitBox: null }; lanes.set(actor.id, L);
     const started = actor.spawnKey ? actions.get(actor.spawnKey) : null;
     L.turn = T;
     L.actor = actor;
+    L.t0 = 0; L.t1 = 0; L.status = null;
     L.from = started && started.b.turn === T ? started.b : null;
     L.boxes = [];
     T.lanes.push(L);
-    const head = flowBox(L, 'head link ' + actor.kind, actor.kind === 'main' ? 'Claude' : actor.label, actor.info || (actor.kind === 'main' ? 'main agent' : 'sub-agent'));
+    const head = flowBox(L, 'head link ' + actor.kind + (actor.model ? ' m-' + modelFamily(actor.model) : ''), actor.kind === 'main' ? 'Claude' : actor.label, actor.info || (actor.kind === 'main' ? 'main agent' : 'sub-agent'));
     head.el.title = 'Click to show this agent in the graph';
     head.el.addEventListener('click', () => showInGraph(actor.id));
     if (actor.kind !== 'main') { T.agents++; turnMeta(T); }
@@ -355,7 +365,7 @@
     el.append(top, t, sub, list);
     el.title = kind + (text ? '\n' + text : '');
     T.grid.append(el);
-    const b = { el, kind, n, dur, t, sub, list, row: 0, seq: ++T.seq, turn: T, lane: L, items: [], expanded: false, gk: null, wait: false };
+    const b = { el, k, kind, n, dur, t, sub, list, row: 0, seq: ++T.seq, turn: T, lane: L, items: [], expanded: false, gk: null, wait: false };
     L.boxes.push(b);
     T.dirty = true;
     queueLines();
@@ -366,26 +376,58 @@
   // time, so boxes side by side really did happen in that order.
   function layout(T) {
     T.dirty = false;
-    const agents = T.lanes.filter((L) => L.actor.kind !== 'main');
-    const rightCount = Math.ceil(agents.length / 2);
-    const mainCol = rightCount + 1;
-    const columnCount = rightCount * 2 + 1;
-    T.grid.style.gridTemplateColumns = 'repeat(' + columnCount + ', 230px)';
-    T.grid.style.width = Math.max(flowEl.clientWidth - 44, columnCount * 230 + (columnCount - 1) * 44) + 'px';
-    T.grid.style.justifyContent = 'center';
-    for (const L of T.lanes) {
-      let r = L.from ? L.from.row : 1;
-      if (L.actor.kind === 'main') L.col = mainCol;
-      else {
-        const i = agents.indexOf(L);
-        L.col = i < rightCount ? mainCol + i + 1 : mainCol - (i - rightCount) - 1;
-      }
+    const COL = 260, GAP = 56;
+    const place = (L, start) => {
+      let r = start, last = start;
       for (const b of L.boxes) {
         const row = ui.align ? b.seq : r++;
         if (b.row !== row) { b.row = row; b.el.style.gridRow = String(row); }
-        b.el.style.gridColumn = String(L.col);
+        last = row;
       }
+      return last;
+    };
+    const main = T.lanes.find((L) => L.actor.kind === 'main');
+    if (main) place(main, 1);
+    // A column is free again once the agent in it finished before this one started.
+    const slots = [];
+    for (const L of T.lanes) {
+      if (L === main) continue;
+      const want = L.from ? L.from.row : 1;
+      let i = slots.findIndex((x) => x.t1 && L.t0 && x.t1 <= L.t0);
+      if (i < 0) { i = slots.length; slots.push({ end: 0, t1: 0 }); }
+      L.slot = i;
+      slots[i].end = place(L, Math.max(want, slots[i].end + 1));
+      slots[i].t1 = L.t1;
     }
+    const left = Math.floor(slots.length / 2);
+    const mainCol = left + 1;
+    const columnCount = slots.length + 1;
+    T.grid.style.gridTemplateColumns = 'repeat(' + columnCount + ', ' + COL + 'px)';
+    T.grid.style.width = Math.max(flowEl.clientWidth - 68, columnCount * COL + (columnCount - 1) * GAP) + 'px';
+    T.grid.style.justifyContent = 'center';
+    for (const L of T.lanes) {
+      // columns alternate right, left, right... of Claude
+      L.col = L === main ? mainCol : L.slot % 2 === 0 ? mainCol + L.slot / 2 + 1 : mainCol - (L.slot + 1) / 2;
+      for (const b of L.boxes) b.el.style.gridColumn = String(L.col);
+    }
+  }
+
+  // Claude's own column ends in one status box. While nothing else happens in the column it is
+  // retitled in place (waiting for agents, an agent reported back, finished) instead of adding a box each time.
+  function agentsRunning(sessionId) {
+    let n = pending.filter((p) => p.session === sessionId).length;
+    for (const x of nodes.values()) if (x.kind === 'agent' && x.status === 'running' && x.id.startsWith('a:' + sessionId + ':')) n++;
+    return n;
+  }
+
+  function statusBox(L, kind, text, cls) {
+    let b = L.status && L.boxes[L.boxes.length - 1] === L.status ? L.status : null;
+    if (!b) { b = flowBox(L, 'term', kind, text); L.status = b; }
+    b.kind = kind; b.k.textContent = kind; b.t.textContent = text || '';
+    for (const c of ['note', 'gather']) b.el.classList.toggle(c, c === cls);
+    b.el.title = kind + (text ? '\n' + text : '');
+    b.turn.dirty = true; queueLines();
+    return b;
   }
 
   // Marks the box an agent is on right now; the light runs round it until the agent moves on or stops.
@@ -450,7 +492,7 @@
       b.el.addEventListener('mouseleave', hideTip);
     }
     const item = {
-      text: e.action === 'spawn' ? (e.subagentType ? e.subagentType + ': ' : '') + (e.detail || '')
+      text: e.action === 'spawn' ? (e.subagentType ? e.subagentType + (e.model ? ' · ' + e.model : '') + ': ' : '') + (e.detail || '')
         : e.action === 'other' && e.detail === e.tool && NICE[e.tool] ? '' : (e.file ? tidyFile(e.file) : e.action === 'run' ? tidyCmd(e.detail) : e.detail || ''),
       more: e.cmd || '',
       file: e.abs || null, line: firstLine(e), fail: false, t0: e.t, t1: 0,
@@ -552,7 +594,8 @@
     if (replayClock) replayClock = e.t;
     if (isAuto(e) && turnBySession.get(e.session)) {
       const L = flowLane(session, e.session);
-      made = flowBox(L, 'term note', autoLabel(e), '');
+      const n = agentsRunning(e.session);
+      made = statusBox(L, autoLabel(e), n ? n + (n === 1 ? ' agent' : ' agents') + ' still working' : '', 'note');
       setCurrent(L, made);
     } else if (e.ev === 'UserPromptSubmit') {
       const T = newTurn(e.session, isAuto(e) ? autoLabel(e) : promptText(e.detail));
@@ -573,7 +616,10 @@
       // anything this agent left open is over now
       for (const b of L.boxes) { let touched = false; for (const i of b.items) if (!i.t1) { i.t1 = i.t0; touched = true; } if (touched) boxTime(b); }
       const mainStop = e.ev === 'Stop';
-      made = flowBox(L, 'term' + (e.detail && !mainStop ? ' said' : ''), mainStop ? 'Finished the turn' : 'Finished', mainStop ? '' : e.detail || '');
+      if (mainStop) {
+        const n = agentsRunning(e.session);
+        made = n ? statusBox(L, 'Waiting for ' + n + (n === 1 ? ' agent' : ' agents'), '', 'gather') : statusBox(L, 'Finished the turn', '', '');
+      } else made = flowBox(L, 'term' + (e.detail ? ' said' : ''), 'Finished', e.detail || '');
       if (mainStop && e.detail) {
         const A = L.turn.ans; A.textContent = '';
         const h = document.createElement('b'); h.textContent = "Claude's answer";
@@ -604,6 +650,11 @@
         }
         render(a.b);
       }
+    }
+    const AL = lanes.get(actor.id);
+    if (AL && AL.turn) {
+      if (!AL.t0) AL.t0 = e.t;
+      if (e.ev === 'SubagentStop') { AL.t1 = e.t; AL.turn.dirty = true; queueLines(); }
     }
     if (made && live && Date.now() - lastUserScroll > 4000 && !flowEl.hidden) {
       made.el.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
@@ -996,7 +1047,7 @@
   // ---------- drawing ----------
   function color(n) {
     if (n.kind === 'main') return theme.main;
-    if (n.kind === 'agent') return theme.agent;
+    if (n.kind === 'agent') return (n.model && theme['m-' + modelFamily(n.model)]) || theme.agent;
     if (n.kind === 'file') return n.edited ? theme.file : theme.muted;
     return theme.section;
   }
