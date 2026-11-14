@@ -119,4 +119,4 @@ Other:
 
 ## Licence
 
-Free for personal use. Professional use needs a paid licence from the author. No modification except on request, and no distribution or commercial use by anyone but the author. The full terms are in `LICENCES.txt`. Versions before 0.10.9 were published under the MIT licence.
+Free for personal use. Professional use needs a paid licence from the author. No modification except on request, and no distribution or commercial use by anyone but the author. The full terms are in `LICENCE.txt`. Versions before 0.10.9 were published under the MIT licence.

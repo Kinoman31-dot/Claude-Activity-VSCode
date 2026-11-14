@@ -4,7 +4,7 @@
 	"description": "Live graph of what Claude Code is doing, plus the Claude usage bar and usage guard, in one extension. Unofficial.",
 	"version": "0.10.9",
 	"publisher": "local",
-	"license": "SEE LICENSE IN LICENCES.txt",
+	"license": "SEE LICENSE IN LICENCE.txt",
 	"icon": "icon.png",
 	"engines": {
 		"vscode": "^1.85.0"
