@@ -1,0 +1,432 @@
+{
+	"name": "claude-activity-graph",
+	"displayName": "Activity Graph for Claude Code",
+	"description": "Live graph of what Claude Code is doing, plus the Claude usage bar and usage guard, in one extension. Unofficial.",
+	"version": "0.10.9",
+	"publisher": "local",
+	"license": "MIT",
+	"icon": "icon.png",
+	"engines": {
+		"vscode": "^1.85.0"
+	},
+	"categories": [
+		"Visualization",
+		"Other"
+	],
+	"activationEvents": [
+		"onStartupFinished",
+		"onView:claudeGraph.view"
+	],
+	"main": "./extension.js",
+	"extensionKind": [
+		"workspace"
+	],
+	"contributes": {
+		"commands": [
+			{
+				"command": "claudeGraph.show",
+				"title": "Claude Graph: Show Activity Graph"
+			},
+			{
+				"command": "claudeGraph.showTab",
+				"title": "Claude Graph: Open in an Editor Tab",
+				"icon": {
+					"light": "media/button-icon.svg",
+					"dark": "media/button-icon.svg"
+				}
+			},
+			{
+				"command": "claudeGraph.showDocked",
+				"title": "Claude Graph: Open in the Bottom Panel"
+			},
+			{
+				"command": "claudeGraph.installHooks",
+				"title": "Claude Graph: Connect This Workspace (Install Hooks)"
+			},
+			{
+				"command": "claudeGraph.removeHooks",
+				"title": "Claude Graph: Disconnect This Workspace (Remove Hooks)"
+			},
+			{
+				"command": "claudeGraph.newPlan",
+				"title": "Claude Graph: New Plan (New Claude Code Conversation in Plan Mode)"
+			},
+			{
+				"command": "claudeGraph.clear",
+				"title": "Claude Graph: Clear Graph"
+			},
+			{
+				"command": "claudeGraph.demo",
+				"title": "Claude Graph: Play Demo"
+			},
+			{
+				"command": "claudeGraph.parallelDemo",
+				"title": "Claude Graph: Play Parallel Agents Demo"
+			},
+			{
+				"command": "claudeGraph.usageGuardDemo",
+				"title": "Claude Graph: Play Full Usage Guard Demo"
+			},
+			{
+				"command": "claudeGraph.update",
+				"title": "Claude Graph: Update Extension from .vsix"
+			},
+			{
+				"command": "claudeGraph.checkUpdate",
+				"title": "Claude Graph: Check for an Update Now"
+			},
+			{
+				"command": "claudeUsageBar.refresh",
+				"title": "Claude Usage Bar: Refresh now"
+			},
+			{
+				"command": "claudeUsageBar.menu",
+				"title": "Claude Usage Bar: Menu"
+			},
+			{
+				"command": "claudeUsageBar.enablePlanLimits",
+				"title": "Claude Usage Bar: Show plan-limit percentages"
+			},
+			{
+				"command": "claudeUsageBar.disablePlanLimits",
+				"title": "Claude Usage Bar: Stop reading plan limits"
+			},
+			{
+				"command": "claudeUsageBar.enableUsageGuard",
+				"title": "Claude Usage Guard: Turn On"
+			},
+			{
+				"command": "claudeUsageBar.disableUsageGuard",
+				"title": "Claude Usage Guard: Turn Off"
+			},
+			{
+				"command": "claudeUsageBar.showLog",
+				"title": "Claude Usage Bar: Show log"
+			},
+			{
+				"command": "claudeUsageBar.guardStatus",
+				"title": "Claude Usage Guard: Show Status"
+			},
+			{
+				"command": "claudeUsageBar.guardSettings",
+				"title": "Claude Usage Guard: Open Settings"
+			},
+			{
+				"command": "claudeGraph.openSettings",
+				"title": "Claude Graph: Open Settings"
+			}
+		],
+		"configuration": [
+			{
+				"title": "Claude Graph",
+				"properties": {
+					"claudeGraph.highlightEdits": {
+						"type": "boolean",
+						"default": true,
+						"description": "Briefly highlight the lines Claude just edited in open editors."
+					},
+					"claudeGraph.highlightSeconds": {
+						"type": "number",
+						"default": 12,
+						"description": "How long an edit highlight stays visible, in seconds."
+					},
+					"claudeGraph.openOnActivity": {
+						"type": "boolean",
+						"default": false,
+						"description": "Open the graph automatically when Claude Code starts working."
+					},
+					"claudeGraph.autoShowPlan": {
+						"type": "boolean",
+						"default": true,
+						"description": "Switch to the Plan view when Claude Code proposes a plan."
+					},
+					"claudeGraph.trackPlanSteps": {
+						"type": "boolean",
+						"default": true,
+						"description": "When you approve a plan, ask Claude Code (in a note it sees next to the approval) to keep one numbered task per plan step, so the Plan view can mark each step to do, in progress and done. Turn off to leave Claude Code's context untouched; steps are then estimated from the files it works on."
+					},
+					"claudeGraph.groupRepeats": {
+						"type": "boolean",
+						"default": true,
+						"description": "In the flowchart, stack several actions of the same kind in a row into one box. Turn off for one box per action."
+					},
+					"claudeGraph.foldEarlierTurns": {
+						"type": "boolean",
+						"default": true,
+						"description": "In the flowchart, fold the previous request away when you send a new one."
+					},
+					"claudeGraph.openIn": {
+						"type": "string",
+						"enum": [
+							"tab",
+							"panel"
+						],
+						"enumDescriptions": [
+							"An editor tab beside your code, like a Claude Code session",
+							"The docked \"Claude Activity\" view in the bottom panel"
+						],
+						"default": "tab",
+						"description": "Where the chart opens when you click Claude Graph in the status bar."
+					},
+					"claudeGraph.autoUpdate": {
+						"type": "string",
+						"enum": [
+							"ask",
+							"install",
+							"off"
+						],
+						"enumDescriptions": [
+							"Offer to install a newer version when one is found",
+							"Install a newer version without asking, then offer to reload",
+							"Never look for newer versions"
+						],
+						"default": "ask",
+						"description": "What to do when a newer claude-activity-graph-x.y.z.vsix file appears in the update folder."
+					},
+					"claudeGraph.updateFolder": {
+						"type": "string",
+						"default": "",
+						"description": "Folder to watch for newer .vsix files of this extension. Empty means your Downloads folder."
+					},
+					"claudeGraph.defaultView": {
+						"type": "string",
+						"enum": [
+							"flow",
+							"graph",
+							"plan"
+						],
+						"enumDescriptions": [
+							"Flowchart: boxes in the order things happened",
+							"Graph: agents, files and code sections as a network",
+							"Plan: the proposed plan and the task list"
+						],
+						"default": "flow",
+						"description": "The view a newly opened chart starts in. After that the panel remembers the view you chose in it."
+					},
+					"claudeGraph.density": {
+						"type": "string",
+						"enum": [
+							"comfortable",
+							"compact"
+						],
+						"enumDescriptions": [
+							"Roomy boxes; an action may take two lines",
+							"Smaller boxes and lists, one line per action: more of the chart on screen"
+						],
+						"default": "comfortable",
+						"description": "How much room boxes and list lines take."
+					},
+					"claudeGraph.showActivityList": {
+						"type": "boolean",
+						"default": true,
+						"description": "Show the activity list in a newly opened chart. The Activity button in the chart switches it at any time."
+					},
+					"claudeGraph.activityListMode": {
+						"type": "string",
+						"enum": [
+							"byAgent",
+							"timeline"
+						],
+						"enumDescriptions": [
+							"Actions grouped under the agent that did them",
+							"All actions in time order"
+						],
+						"default": "byAgent",
+						"description": "How the activity list is arranged in a newly opened chart."
+					},
+					"claudeGraph.showUsageStrip": {
+						"type": "boolean",
+						"default": true,
+						"description": "Show the Claude usage strip along the bottom of the chart. The usage bar in the status bar is not affected."
+					},
+					"claudeGraph.showAnswerBanner": {
+						"type": "boolean",
+						"default": true,
+						"description": "Show Claude's answer in a banner above the flowchart."
+					},
+					"claudeGraph.showTimings": {
+						"type": "boolean",
+						"default": true,
+						"description": "Show how long each action took on its box."
+					},
+					"claudeGraph.followNewActions": {
+						"type": "boolean",
+						"default": true,
+						"description": "Scroll to the newest action (and, in the Plan view, to the step being worked on) as work goes on. Scrolling yourself always pauses this for a few seconds."
+					},
+					"claudeGraph.foldFinishedPhases": {
+						"type": "boolean",
+						"default": true,
+						"description": "In the Plan view, fold a phase away when all its steps are done."
+					},
+					"claudeGraph.estimatePlanSteps": {
+						"type": "boolean",
+						"default": true,
+						"description": "In the Plan view, estimate the status of steps nobody reports on from the files Claude works on (\"Started\", \"Likely done\")."
+					},
+					"claudeGraph.maxEvents": {
+						"type": "number",
+						"default": 3000,
+						"minimum": 200,
+						"maximum": 20000,
+						"description": "How many events the chart keeps and stores for the workspace. Older ones are dropped."
+					}
+				}
+			},
+			{
+				"title": "Claude Usage Bar",
+				"properties": {
+					"claudeUsageBar.usePlanLimits": {
+						"type": "boolean",
+						"default": false,
+						"markdownDescription": "Show the real 5-hour and weekly percentages from Anthropic. This reads the sign-in token in `~/.claude/.credentials.json` and sends it to `api.anthropic.com`. Use the command *Show plan-limit percentages* to turn it on with an explanation."
+					},
+					"claudeUsageBar.refreshSeconds": {
+						"type": "number",
+						"default": 60,
+						"minimum": 30,
+						"description": "How often to ask Anthropic for the plan limits (it also asks after each Claude Code reply)."
+					},
+					"claudeUsageBar.barWidth": {
+						"type": "number",
+						"default": 8,
+						"minimum": 4,
+						"maximum": 20,
+						"description": "Number of blocks in each bar."
+					},
+					"claudeUsageBar.showWeekly": {
+						"type": "boolean",
+						"default": false,
+						"description": "Also show the weekly limits on the bar: all models, and the one for a single model when your plan has it. They are always listed when you hover over the bar."
+					},
+					"claudeUsageBar.showResetTime": {
+						"type": "boolean",
+						"default": true,
+						"description": "Show the time each limit resets, next to its bar (for example: 5h ███░░░░░ 38% (resets 03:00 PM))."
+					},
+					"claudeUsageBar.warnAt": {
+						"type": "number",
+						"default": 80,
+						"description": "Percent at which the status bar item turns yellow."
+					},
+					"claudeUsageBar.errorAt": {
+						"type": "number",
+						"default": 95,
+						"description": "Percent at which the status bar item turns red."
+					},
+					"claudeUsageBar.guardThreshold": {
+						"type": "number",
+						"default": 95,
+						"minimum": 1,
+						"maximum": 100,
+						"description": "Upper bound for the usage guard: it never stops later than this percentage, whatever its own settings say."
+					},
+					"claudeUsageBar.fiveHourTokenBudget": {
+						"type": "number",
+						"default": 0,
+						"minimum": 0,
+						"description": "Only used when plan limits are off: how many tokens you count as a full 5-hour block. 0 means show plain token counts without a fill bar."
+					}
+				}
+			},
+			{
+				"title": "Claude Usage Guard",
+				"properties": {
+					"claudeUsageGuard.enabled": {
+						"type": "boolean",
+						"default": false,
+						"markdownDescription": "Turn the usage guard on or off. On: Claude Code is asked for a hand-off file and then stopped shortly before the 5-hour limit, and continues in a new session after the reset. This adds or removes the guard's hooks in Claude Code's user settings (`~/.claude/settings.json`); other hooks are kept. Needs Node.js. Applies to Claude Code sessions started afterwards."
+					},
+					"claudeUsageGuard.carefulAt": {
+						"type": [
+							"number",
+							"null"
+						],
+						"default": null,
+						"minimum": 1,
+						"maximum": 100,
+						"markdownDescription": "Percent of the 5-hour limit from which Claude is asked to work in small steps. Leave empty for the guard's own value (75)."
+					},
+					"claudeUsageGuard.handoffAt": {
+						"type": [
+							"number",
+							"null"
+						],
+						"default": null,
+						"minimum": 1,
+						"maximum": 100,
+						"markdownDescription": "Percent from which Claude is asked to write the hand-off file. Leave empty for the guard's own value (85)."
+					},
+					"claudeUsageGuard.updateAt": {
+						"type": [
+							"number",
+							"null"
+						],
+						"default": null,
+						"minimum": 1,
+						"maximum": 100,
+						"markdownDescription": "Percent from which Claude is asked for one short update of the hand-off file. Leave empty for the guard's own value (90)."
+					},
+					"claudeUsageGuard.endAt": {
+						"type": [
+							"number",
+							"null"
+						],
+						"default": null,
+						"minimum": 1,
+						"maximum": 100,
+						"markdownDescription": "Percent a session must end at or below. The guard stops a little earlier, leaving room for the final reply. Leave empty for the guard's own value (95)."
+					},
+					"claudeUsageGuard.weeklyWarnAt": {
+						"type": [
+							"number",
+							"null"
+						],
+						"default": null,
+						"minimum": 0,
+						"maximum": 100,
+						"markdownDescription": "Percent of a weekly limit from which Claude warns you (it never stops for a weekly limit). `0` switches the warning off. Leave empty for the guard's own value (80)."
+					},
+					"claudeUsageGuard.scriptPath": {
+						"type": "string",
+						"default": "",
+						"markdownDescription": "Only if you keep the guard scripts somewhere of your own: the full path of `usage-hook.js`. Empty uses the guard that is already installed, or else the copy that ships with this extension."
+					}
+				}
+			}
+		],
+		"viewsContainers": {
+			"panel": [
+				{
+					"id": "claudeGraph",
+					"title": "Claude Activity",
+					"icon": "media/view-icon.svg"
+				}
+			]
+		},
+		"views": {
+			"claudeGraph": [
+				{
+					"type": "webview",
+					"id": "claudeGraph.view",
+					"name": "Activity",
+					"icon": "media/view-icon.svg",
+					"contextualTitle": "Claude Activity"
+				}
+			]
+		},
+		"menus": {
+			"editor/title": [
+				{
+					"command": "claudeGraph.showTab",
+					"group": "navigation"
+				}
+			]
+		}
+	},
+	"__metadata": {
+		"installedTimestamp": 1794501171363,
+		"targetPlatform": "undefined",
+		"size": 242337
+	}
+}

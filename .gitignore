@@ -1,0 +1,8 @@
+harness/ext/
+harness/out/
+harness/edge-profile/
+harness/data.js
+harness/page-*.html
+backups/
+HANDOFF*.md
+CLAUDE.md

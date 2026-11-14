@@ -30,13 +30,20 @@ Click a file, a code section or an activity line to open it at the right line. L
 
 ## Install
 
-1. In VS Code: Extensions panel > `...` menu > **Install from VSIX...** and choose `claude-activity-graph-0.9.15.vsix`.
+1. In VS Code: Extensions panel > `...` menu > **Install from VSIX...** and choose the `claude-activity-graph-x.y.z.vsix` file.
 2. Open your project folder.
 3. Click **Claude Graph** in the status bar (bottom right), or the graph icon at the top right of any editor. The chart opens as an editor tab beside your code, like a Claude Code session; drag the tab wherever you want it. A docked copy is also available in the bottom panel as **Claude Activity** (set `claudeGraph.openIn` to `panel` to make that the default).
 4. Click **Connect this workspace**.
 5. Start Claude Code in that folder and give it a task. If a session was already running and nothing appears, restart it.
 
-**Play a demo** shows a sample run without Claude Code. **Parallel agents demo** is a separate example with three agents working at once; Claude integrates their work and runs `npm test` after all three finish. **Full usage guard demo** shows a complete task: normal work, careful mode, a failed test and fix, a limit stop, saved hand-off, usage-window reset, resume, and final checks. Demos are simulated, do not change project files or wait for a real usage reset, and remain visible until cleared, replaced by another demo, or VS Code restarts. They are not saved to disk. Start these from their buttons or the matching **Claude Graph: Play … Demo** commands in the Command Palette.
+**Play a demo** shows a sample run without Claude Code. **Parallel agents demo** is a separate example with three agents working at once; Claude integrates their work and runs `npm test` after all three finish. **Full usage guard demo** shows a complete task: normal work, careful mode, a failed test and fix, a limit stop, saved hand-off, usage-window reset, resume, and final checks. Demos are simulated, do not change project files or wait for a real usage reset, and remain visible until cleared, replaced by another demo, or VS Code restarts. They are not saved to disk. Start these from the empty chart, from the **⋯** menu at the right of the toolbar, or with the matching **Claude Graph: Play … Demo** commands in the Command Palette.
+
+## The toolbar and the lists
+
+- **Activity** shows or hides the activity list. In a wide tab the list is a column on the right, with the Requests list above it. In half an editor both sit side by side under the chart. In a side bar only the Requests list is shown. With Activity switched off, the Requests list stays under the chart, because it is the way back to an earlier request.
+- **⋯** holds the rare actions: the demos, **Install an update from a file…** and **Clear the chart…**. Clearing asks first when real work would be deleted.
+- Each open request card is captioned with its request. When several Claude Code sessions are shown together, cards, columns and the activity list also say which session they belong to.
+- The strip at the bottom shows the plan limits (5 hours, the week, and the week for a single model when your plan has one). Click it to refresh.
 
 ## Several sessions and folders
 
@@ -57,12 +64,42 @@ The extension is installed from a file, so it updates from a file too. It watche
 - It only looks at files named exactly like that, and only installs a higher version than the one running.
 - With `install`, any file with that name in the folder is installed without a prompt, so keep `ask` if other people can put files in that folder.
 - `claudeGraph.updateFolder` changes the folder. **Claude Graph: Check for an Update Now** looks immediately.
-- The **Update** button still installs any `.vsix` you pick by hand.
+- **Install an update from a file…** in the **⋯** menu still installs any `.vsix` you pick by hand.
 - If VS Code is connected to a remote machine (WSL, SSH, a container), the folder is the Downloads folder on that machine.
 
-The extension works with VS Code 1.80 and every later version, so updating VS Code itself needs no action.
+The extension works with VS Code 1.85 and every later version, so updating VS Code itself needs no action.
+
+## The Plan view
+
+- **New plan** opens a new Claude Code conversation in plan mode: Claude researches without changing anything and proposes a plan. A running conversation cannot be switched from outside; there, use Shift+Tab or the mode picker.
+- **Refresh** reads the plan file from disk again and works the plan and the task list out again.
+- Steps are marked to do, in progress and done. When you approve a plan, Claude Code is asked (in a note it sees next to the approval) to keep one numbered task per step; the view follows those tasks. Steps nobody reports on are estimated from the files Claude works on and marked "Started" or "Likely done".
+- A finished phase folds away with a Done badge; click any phase header to fold or open it.
+
+## The usage guard
+
+The usage guard stops Claude Code shortly before your 5-hour limit: it asks for a hand-off file first, blocks further work near the limit, and continues in a new session after the reset. It warns about weekly limits and never stops for them.
+
+- **Turn it on or off:** the setting **Claude Usage Guard: Enabled**, the commands **Claude Usage Guard: Turn On / Turn Off**, or the menu of the usage bar in the status bar. Nothing has to be picked or installed by hand; it needs Node.js. The change applies to Claude Code sessions started afterwards.
+- **What that does:** it adds or removes the guard's hooks in Claude Code's user settings (`~/.claude/settings.json`), keeping every other hook. The scripts are put in `~/.claude-usage-guard/scripts`. A guard you already installed from somewhere else is left where it is.
+- **Thresholds:** `claudeUsageGuard.carefulAt` (75), `handoffAt` (85), `updateAt` (90), `endAt` (95) and `weeklyWarnAt` (80). Leave one empty to keep the guard's own value. They must rise in that order.
+- **Claude Usage Guard: Show Status** prints where the guard stands: the stage, the estimated usage, the stop point and the weekly limits.
 
 ## Settings
+
+**Open them** with **Settings…** in the chart's **⋯** menu, or **Claude Graph: Open Settings**.
+
+How the chart looks and behaves:
+
+- `claudeGraph.defaultView`: `flow` (default), `graph` or `plan`, for a newly opened chart
+- `claudeGraph.density`: `comfortable` (default) or `compact`
+- `claudeGraph.showActivityList` and `claudeGraph.activityListMode` (`byAgent` or `timeline`): the activity list in a newly opened chart
+- `claudeGraph.showUsageStrip`, `claudeGraph.showAnswerBanner`, `claudeGraph.showTimings`: show or hide those parts (all on by default)
+- `claudeGraph.followNewActions`: scroll to the newest action and the step being worked on (default on)
+- `claudeGraph.foldFinishedPhases`, `claudeGraph.estimatePlanSteps`, `claudeGraph.trackPlanSteps`: the Plan view (all on by default)
+- `claudeGraph.maxEvents`: how many events are kept (default 3000)
+
+Other:
 
 - `claudeGraph.highlightEdits`: highlight edited lines in open editors (default on)
 - `claudeGraph.highlightSeconds`: how long the highlight lasts (default 12)

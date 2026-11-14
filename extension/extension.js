@@ -7,13 +7,19 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const os = require('os');
+const usageBar = require('./usage-bar');   // the usage bar in the status bar, and its usage-guard hook commands
 
 const HOOK_PATH = '/claude-graph';
 const HOOK_EVENTS = [
   'SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure',
   'SubagentStart', 'SubagentStop', 'Stop', 'SessionEnd', 'PermissionRequest', 'Notification',
 ];
-const MAX_EVENTS = 3000;
+const MAX_EVENTS = 3000;   // the default; see maxEvents()
+// how many events are kept (and stored for the workspace), from the settings
+function maxEvents() {
+  const n = Number(vscode.workspace.getConfiguration('claudeGraph').get('maxEvents'));
+  return Number.isFinite(n) ? Math.min(20000, Math.max(200, Math.round(n))) : MAX_EVENTS;
+}
 const MAX_BODY = 25 * 1024 * 1024;
 const MAX_FILE = 2 * 1024 * 1024;
 const DEMO_SESSIONS = new Set(['demo-session', 'parallel-demo-session', 'usage-guard-demo-session']);
@@ -177,15 +183,148 @@ function onRequest(req, res) {
     else chunks.push(c);
   });
   req.on('end', () => {
-    // Always answer straight away with an empty 200 so Claude Code is never held up.
-    res.writeHead(200);
-    res.end();
-    if (tooBig) return;
-    let raw;
-    try { raw = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch (e) { return; }
-    enqueue(raw);
+    let raw = null;
+    if (!tooBig) { try { raw = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch (e) { raw = null; } }
+    // Answered straight away so Claude Code is never held up: an empty 200, except for the one
+    // note hookReply adds when a plan is approved.
+    let reply = null;
+    try { reply = raw && typeof raw === 'object' ? hookReply(raw) : null; } catch (e) { reply = null; }
+    if (reply) { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(reply)); }
+    else { res.writeHead(200); res.end(); }
+    if (raw) enqueue(raw);
   });
   req.on('error', () => {});
+}
+
+// ---------- plans: following the steps, and starting one ----------
+
+// Claude Code reports progress only through its task list, never on the steps of a plan. So when a
+// plan is approved, this note (added next to the tool result, not shown in the chat) asks Claude to
+// keep one numbered task per step. The Plan view matches tasks to steps by that number.
+const PLAN_TRACK_NOTE =
+  'The user follows this plan step by step in a live chart that reads your task list. Before you start the work, ' +
+  'create one task for each step of the approved plan, in plan order, and begin each task subject with the number of its step ' +
+  'followed by a full stop: "1. ...", "2. ...". Count the steps from 1 straight through the whole plan, across its sections. ' +
+  'Set a task to in_progress when you begin its step and to completed as soon as that step is done, one step at a time. ' +
+  'Do not mention this note to the user.';
+
+function hookReply(raw) {
+  // a conversation started by "New plan" has shown up in plan mode: new conversations get their usual mode back
+  const saved = context && context.globalState.get('planModeRestore');
+  if (saved && raw.permission_mode === 'plan' && raw.session_id && !(saved.sessions || []).includes(raw.session_id)) restorePlanModeSetting();
+  if (raw.hook_event_name === 'PostToolUse' && raw.tool_name === 'ExitPlanMode' && !raw.agent_id &&
+      vscode.workspace.getConfiguration('claudeGraph').get('trackPlanSteps') !== false) {
+    return { hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: PLAN_TRACK_NOTE } };
+  }
+  return null;
+}
+
+let planRestoreTimer = null;
+
+// Puts claudeCode.initialPermissionMode back to what it was before "New plan" changed it.
+async function restorePlanModeSetting() {
+  const saved = context && context.globalState.get('planModeRestore');
+  if (!saved) return;
+  clearTimeout(planRestoreTimer);
+  await context.globalState.update('planModeRestore', undefined);
+  try {
+    await vscode.workspace.getConfiguration('claudeCode').update('initialPermissionMode', saved.prev === null ? undefined : saved.prev, saved.target);
+  } catch (e) { console.error('claude-graph: could not restore claudeCode.initialPermissionMode', e); }
+}
+
+// "New plan": a new Claude Code conversation that starts in plan mode. A running conversation
+// cannot be switched from outside, so this opens a fresh one: the Claude Code extension reads
+// claudeCode.initialPermissionMode when a conversation is created, so the setting is set to "plan"
+// for that moment and put back once the new conversation has reported in (or after ten minutes).
+async function newPlanConversation() {
+  const HOW = 'In a running conversation, switch to plan mode yourself: Shift+Tab in the prompt box, or the mode picker under it.';
+  const commands = await vscode.commands.getCommands(true);
+  if (!commands.includes('claude-vscode.newConversation')) {
+    vscode.window.showWarningMessage('The Claude Code extension is not active in this window, so a plan-mode conversation cannot be opened from here. ' + HOW);
+    return;
+  }
+  const cfg = vscode.workspace.getConfiguration('claudeCode');
+  if (cfg.get('initialPermissionMode') !== 'plan') {
+    const info = cfg.inspect('initialPermissionMode') || {};
+    const target = info.workspaceValue !== undefined ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
+    const prev = target === vscode.ConfigurationTarget.Workspace ? info.workspaceValue : info.globalValue;
+    if (!context.globalState.get('planModeRestore')) {
+      await context.globalState.update('planModeRestore', { target, prev: prev === undefined ? null : prev, sessions: [...new Set(events.map((e) => e.session))].slice(-80) });
+    }
+    try {
+      await cfg.update('initialPermissionMode', 'plan', target);
+    } catch (e) {
+      await context.globalState.update('planModeRestore', undefined);
+      vscode.window.showWarningMessage('Could not set Claude Code to plan mode (' + e.message + '). ' + HOW);
+      return;
+    }
+    clearTimeout(planRestoreTimer);
+    planRestoreTimer = setTimeout(restorePlanModeSetting, 10 * 60e3);
+  }
+  try {
+    await vscode.commands.executeCommand('claude-vscode.newConversation');
+  } catch (e) {
+    await restorePlanModeSetting();
+    vscode.window.showWarningMessage('Could not open a new Claude Code conversation (' + e.message + '). ' + HOW);
+    return;
+  }
+  vscode.window.showInformationMessage('A new Claude Code conversation is open in plan mode. Describe what you want: Claude researches without changing anything and proposes a plan, which appears in the Plan view.');
+}
+
+// Refresh in the Plan view: the plan file on disk may be newer than what the hooks reported (you
+// edited it by hand, or Claude changed it in a way no hook showed). Each session's plan file is
+// read again, and a changed one is sent to the chart as a plan update.
+function findPlanFile(title) {
+  const dirs = roots().map((r) => path.join(r, '.claude', 'plans'));
+  dirs.push(path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'plans'));
+  const found = [];
+  for (const d of dirs) {
+    let names = [];
+    try { names = fs.readdirSync(d).filter((n) => /\.md$/i.test(n)); } catch (e) { continue; }
+    for (const n of names) {
+      try { const f = path.join(d, n); found.push({ f, m: fs.statSync(f).mtimeMs }); } catch (e) { /* gone meanwhile */ }
+    }
+  }
+  found.sort((a, b) => b.m - a.m);
+  for (const { f } of found.slice(0, 40)) {
+    try {
+      const fd = fs.openSync(f, 'r');
+      const buf = Buffer.alloc(4096);
+      const n = fs.readSync(fd, buf, 0, 4096, 0);
+      fs.closeSync(fd);
+      if (planTitle(buf.toString('utf8', 0, n)) === title) return f;
+    } catch (e) { /* unreadable: try the next one */ }
+  }
+  return null;
+}
+
+function refreshPlanFiles() {
+  const bySession = new Map(); // session -> { text: the plan as last shown, title, file }
+  for (const e of events) {
+    const text = e.planUpdate || e.plan;
+    if (!text || isDemoEvent(e)) continue;
+    const s = bySession.get(e.session) || {};
+    s.text = text; s.title = planTitle(text);
+    if (e.planUpdate && e.abs) s.file = e.abs;
+    bySession.set(e.session, s);
+  }
+  const out = { plans: bySession.size, sent: 0, missing: 0 };
+  for (const [session, s] of bySession) {
+    const file = s.file && fs.existsSync(s.file) ? s.file : findPlanFile(s.title);
+    if (!file) { out.missing++; continue; }
+    let text;
+    try {
+      if (fs.statSync(file).size > MAX_FILE) { out.missing++; continue; }
+      text = fs.readFileSync(file, 'utf8').slice(0, 12000);
+    } catch (e) { out.missing++; continue; }
+    if (text === s.text || !text.trim()) continue;
+    const e = { id: ++seq, t: Date.now(), ev: 'PlanFile', session, agentId: null, agentType: null, tool: null, toolUseId: null, action: null, abs: file, planUpdate: text };
+    events.push(e);
+    persist(e);
+    post({ type: 'event', event: e });
+    out.sent++;
+  }
+  return out;
 }
 
 function enqueue(raw) {
@@ -395,6 +534,11 @@ async function handleRaw(raw) {
         e.ranges = await rangesFor(raw, action, abs, ev === 'PostToolUse');
       }
     }
+    if (ev === 'PostToolUse' && e.abs && /[\\/]\.claude[\\/]plans[\\/][^\\/]+\.md$/i.test(e.abs)) {
+      try {
+        if (fs.statSync(e.abs).size <= MAX_FILE) e.planUpdate = fs.readFileSync(e.abs, 'utf8').slice(0, 12000);
+      } catch (err) { /* the plan file is gone: nothing to show */ }
+    }
     if (ev === 'PreToolUse' && action === 'edit') {
       e.diff = (Array.isArray(input.edits) ? input.edits : [input]).slice(0, 3)
         .map((x) => ({ o: clip(x && x.old_string), n: clip(x && x.new_string) })).filter((d) => d.o || d.n);
@@ -439,7 +583,7 @@ async function handleRaw(raw) {
   }
 
   events.push(e);
-  if (events.length > MAX_EVENTS) events = events.slice(-MAX_EVENTS);
+  if (events.length > maxEvents()) events = events.slice(-maxEvents());
   if (!raw._demo) persist(e);
   if (ev === 'PermissionRequest' || (ev === 'Notification' && e.ntype === 'permission_prompt')) waiting = true;
   else if (ev !== 'Notification') waiting = false;
@@ -475,7 +619,7 @@ function loadHistory() {
         if (!isDemoEvent(event)) loaded.push(event);
       } catch (e) { /* skip a damaged line */ }
     }
-    events = loaded.slice(-MAX_EVENTS);
+    events = loaded.slice(-maxEvents());
     seq = events.reduce((m, e) => Math.max(m, e.id || 0), 0);
     if (events.length !== lines.length) fs.writeFileSync(storeFile, events.map((e) => JSON.stringify(e)).join('\n') + '\n');
   } catch (e) { events = []; }
@@ -525,7 +669,7 @@ function emitUsageGuard(sessionId, windowId, guardKey, stage, label, detail) {
     guardWindow: windowId, guardKey, guardStage: stage, guardLabel: label, detail, tool: 'Usage guard', action: 'guard',
   };
   events.push(e);
-  if (events.length > MAX_EVENTS) events = events.slice(-MAX_EVENTS);
+  if (events.length > maxEvents()) events = events.slice(-maxEvents());
   persist(e);
   post({ type: 'event', event: e });
 }
@@ -645,18 +789,33 @@ function html(webview) {
 </head>
 <body>
 <header>
-  <span id="status" class="status"></span>
-  <span id="counts" class="counts"></span>
-  <select id="sessionPick" title="Show one Claude Code session, or all of them" hidden></select>
-  <button id="viewFlow" class="seg" title="One box per action, in order">Flowchart</button><button id="viewGraph" class="seg" title="Agents, files and code sections as a network">Graph</button><button id="viewPlan" class="seg" title="The proposed plan and task list as a flowchart">Plan</button><button id="align" class="seg gap" title="Line boxes up across agents in the order they happened. Leaves gaps, but shows what ran at the same time.">Align by time</button>
-  <span class="spacer"></span>
-  <button id="connect" class="primary" hidden>Connect this workspace</button>
-  <button id="toggleAside" class="seg" title="Show or hide the activity list on the right">Activity</button>
-  <button id="replay" title="Play the whole session again from the start">Replay</button>
-  <button id="update" title="Install a newer version of this extension from a .vsix file">Update</button>
-  <button id="fit" title="Fit the graph to the panel">Fit</button>
-  <button id="clear" title="Remove everything from the graph">Clear</button>
+  <div class="hgroup hinfo">
+    <span id="status" class="status"></span>
+    <span id="counts" class="counts"></span>
+    <select id="sessionPick" title="Show one Claude Code session, or all of them" hidden></select>
+  </div>
+  <div class="hgroup hviews">
+    <span class="segs"><button id="viewFlow" class="seg" title="One box per action, in order">Flowchart</button><button id="viewGraph" class="seg" title="Agents, files and code sections as a network">Graph</button><button id="viewPlan" class="seg" title="The proposed plan and task list as a flowchart">Plan</button></span>
+    <button id="align" class="seg toggle" title="Line boxes up across agents in the order they happened. Leaves gaps, but shows what ran at the same time.">Align by time</button>
+  </div>
+  <div class="hgroup hacts">
+    <button id="connect" class="primary" hidden>Connect this workspace</button>
+    <button id="toggleAside" class="seg toggle" title="Show or hide the activity list on the right">Activity</button>
+    <button id="replay" title="Play the whole session again from the start">Replay</button>
+    <button id="fit" title="Fit the graph to the panel">Fit</button>
+    <button id="more" class="seg toggle" title="More: demos, update, clear" aria-haspopup="menu" aria-expanded="false" aria-label="More actions">&#8943;</button>
+  </div>
 </header>
+<div id="menu" role="menu" hidden>
+  <button id="demo2" role="menuitem">Play a demo</button>
+  <button id="parallelDemo2" role="menuitem">Parallel agents demo</button>
+  <button id="usageGuardDemo2" role="menuitem">Full usage guard demo</button>
+  <hr>
+  <button id="settings" role="menuitem" title="Everything that can be changed: the chart, the usage bar and the usage guard">Settings…</button>
+  <button id="update" role="menuitem" title="Install a newer version of this extension from a .vsix file">Install an update from a file…</button>
+  <button id="clear" role="menuitem" class="danger" title="Remove everything from the chart and delete the stored events of this workspace">Clear the chart…</button>
+  <div id="menuNote" class="menuNote"></div>
+</div>
 <main>
   <div id="stage">
     <canvas id="graph"></canvas>
@@ -665,13 +824,15 @@ function html(webview) {
     <div id="empty">
       <p class="big">Waiting for Claude Code</p>
       <p id="emptyHint"></p>
-      <p><button id="demo">Play a demo</button> <button id="parallelDemo">Parallel agents demo</button> <button id="usageGuardDemo">Full usage guard demo</button></p>
+      <p id="emptyConnect" hidden><button id="connect2" class="primary">Connect this workspace</button></p>
+      <p class="demos"><span>Or watch an example:</span> <button id="demo">Play a demo</button> <button id="parallelDemo">Parallel agents demo</button> <button id="usageGuardDemo">Full usage guard demo</button></p>
     </div>
     <div id="tip" hidden></div>
     <div id="legend"></div>
   </div>
-  <aside><section id="requests" hidden><h2>Requests</h2><div id="prompts"></div></section><div class="aside-head"><h2>Activity</h2><span class="spacer"></span><button id="modeAgent" class="seg" title="Group actions under the agent that did them">By agent</button><button id="modeTime" class="seg" title="All actions in time order">Timeline</button></div><div id="groups"></div><ol id="feed" hidden></ol></aside>
+  <aside><section id="requests" hidden><h2>Requests</h2><div id="prompts"></div></section><section id="activity"><div class="aside-head"><h2>Activity</h2><span class="spacer"></span><button id="modeAgent" class="seg" title="Group actions under the agent that did them">By agent</button><button id="modeTime" class="seg" title="All actions in time order">Timeline</button></div><div id="groups"></div><ol id="feed" hidden></ol></section></aside>
 </main>
+<footer id="usage" class="usage" title="Claude usage. Click to refresh." hidden></footer>
 <script nonce="${n}" src="${js}"></script>
 </body>
 </html>`;
@@ -691,6 +852,18 @@ function options() {
     autoPlan: cfg.get('autoShowPlan') !== false,
     group: cfg.get('groupRepeats') !== false,
     fold: cfg.get('foldEarlierTurns') !== false,
+    // how the chart looks and behaves
+    density: cfg.get('density') === 'compact' ? 'compact' : 'comfortable',
+    usage: cfg.get('showUsageStrip') !== false,
+    answer: cfg.get('showAnswerBanner') !== false,
+    timings: cfg.get('showTimings') !== false,
+    follow: cfg.get('followNewActions') !== false,
+    foldPhases: cfg.get('foldFinishedPhases') !== false,
+    estimate: cfg.get('estimatePlanSteps') !== false,
+    // where a newly opened panel starts (after that, the panel remembers what you chose in it)
+    defaultView: ['flow', 'graph', 'plan'].includes(cfg.get('defaultView')) ? cfg.get('defaultView') : 'flow',
+    aside: cfg.get('showActivityList') !== false,
+    mode: cfg.get('activityListMode') === 'timeline' ? 'time' : 'agent',
   };
 }
 
@@ -719,6 +892,10 @@ function attach(webview, onGone) {
     if (m.type === 'ready') {
       postInit(webview);
       postState();
+      const usage = usageBar.getUsageSnapshot();
+      if (usage) webview.postMessage({ type: 'usage', usage });
+    } else if (m.type === 'usageRefresh') {
+      usageBar.refreshUsage();
     } else if (m.type === 'open' && typeof m.file === 'string') {
       openFile(m.file, Number(m.line) || 0);
     } else if (m.type === 'connect') {
@@ -729,6 +906,14 @@ function attach(webview, onGone) {
       const command = m.type === 'parallelDemo' ? 'claudeGraph.parallelDemo'
         : m.type === 'usageGuardDemo' ? 'claudeGraph.usageGuardDemo' : 'claudeGraph.demo';
       vscode.commands.executeCommand(command);
+    } else if (m.type === 'settings') {
+      vscode.commands.executeCommand('claudeGraph.openSettings');
+    } else if (m.type === 'planRefresh') {
+      let r = { plans: 0, sent: 0, missing: 0 };
+      try { r = refreshPlanFiles(); } catch (e) { console.error('claude-graph: plan refresh', e); }
+      webview.postMessage({ type: 'planRefreshed', ...r });
+    } else if (m.type === 'newPlan') {
+      vscode.commands.executeCommand('claudeGraph.newPlan');
     } else if (m.type === 'update') {
       vscode.commands.executeCommand('claudeGraph.update');
     }
@@ -1136,6 +1321,11 @@ function playUsageGuardDemo() {
 // ---------- activation ----------
 
 async function activate(ctx) {
+  // the usage bar is independent of the graph: if it fails, the graph still works
+  try {
+    usageBar.activateUsageBar(ctx);
+    usageBar.setUsageListener((usage) => post({ type: 'usage', usage }));
+  } catch (e) { console.error('Claude usage bar could not start:', e); }
   context = ctx;
   decoration = vscode.window.createTextEditorDecorationType({
     isWholeLine: true,
@@ -1168,7 +1358,18 @@ async function activate(ctx) {
     vscode.commands.registerCommand('claudeGraph.parallelDemo', playParallelDemo),
     vscode.commands.registerCommand('claudeGraph.usageGuardDemo', playUsageGuardDemo),
     vscode.commands.registerCommand('claudeGraph.update', updateExtension),
-    vscode.commands.registerCommand('claudeGraph.clear', () => {
+    vscode.commands.registerCommand('claudeGraph.newPlan', newPlanConversation),
+    vscode.commands.registerCommand('claudeGraph.openSettings', () => vscode.commands.executeCommand('workbench.action.openSettings', '@ext:' + context.extension.id)),
+    vscode.commands.registerCommand('claudeGraph.clear', async () => {
+      // Clearing also deletes the stored history of this workspace, so real work is asked about first.
+      const real = events.filter((e) => !isDemoEvent(e)).length;
+      if (real) {
+        const pick = await vscode.window.showWarningMessage('Clear the Claude Activity chart?', {
+          modal: true,
+          detail: `This removes ${real} recorded ${real === 1 ? 'event' : 'events'} of this workspace from the chart and from VS Code's storage. Claude Code itself is not affected.`,
+        }, 'Clear');
+        if (pick !== 'Clear') return;
+      }
       events = [];
       waiting = false;
       if (storeFile) fs.rm(storeFile, { force: true }, () => {});
@@ -1197,7 +1398,7 @@ async function activate(ctx) {
       postState();
       updateStatus();
     }),
-    { dispose: () => { if (server) server.close(); clearTimeout(highlightTimer); clearTimeout(updateTimer); clearInterval(usageGuardTimer); if (updateWatcher) updateWatcher.close(); demoTimers.forEach(clearTimeout); } },
+    { dispose: () => { if (server) server.close(); clearTimeout(highlightTimer); clearTimeout(updateTimer); clearTimeout(planRestoreTimer); clearInterval(usageGuardTimer); if (updateWatcher) updateWatcher.close(); demoTimers.forEach(clearTimeout); } },
   );
 
   if (ctx.storageUri) {
@@ -1220,6 +1421,8 @@ async function activate(ctx) {
     vscode.window.showErrorMessage(`Claude Graph could not start: ${e.message}`);
   }
   updateStatus();
+  // a "New plan" whose setting change was never put back (the window was closed first)
+  restorePlanModeSetting();
   pollUsageGuard();
   usageGuardTimer = setInterval(pollUsageGuard, 2500);
 
@@ -1231,6 +1434,7 @@ async function activate(ctx) {
 }
 
 function deactivate() {
+  try { usageBar.deactivateUsageBar(); } catch (e) { /* already stopped */ }
   if (server) server.close();
 }
 

@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>frame</title>
+<style>html,body{margin:0;height:100%;background:#7a3b8f;overflow:hidden}iframe{border:0;display:block}</style></head>
+<body><script>
+// Holds the panel in an iframe of an exact size (a VS Code webview is an iframe too), because a
+// headless browser window cannot be made narrower than about 500 px.
+const P = new URLSearchParams(location.search);
+const f = document.createElement('iframe');
+f.width = P.get('w'); f.height = P.get('h');
+const src = P.get('src'); P.delete('w'); P.delete('h'); P.delete('src');
+f.src = src + '?' + P.toString();
+document.body.append(f);
+addEventListener('message', (m) => {
+  if (!m.data || !m.data.__id) return;
+  const pre = document.createElement('pre'); pre.id = m.data.__id; pre.hidden = true; pre.textContent = m.data.text;
+  document.body.append(pre);
+});
+</script></body></html>

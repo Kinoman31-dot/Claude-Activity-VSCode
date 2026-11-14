@@ -32,9 +32,19 @@
   let hover = null;
   let drag = null;
   let state = { port: 0, connected: false, hasFolder: true };
-  let opts = { autoPlan: true, group: true, fold: true };   // user settings, sent by the extension
+  // user settings, sent by the extension
+  const OPT_DEFAULTS = { autoPlan: true, group: true, fold: true, density: 'comfortable', usage: true, answer: true, timings: true, follow: true, foldPhases: true, estimate: true, defaultView: 'flow', aside: true, mode: 'agent' };
+  let opts = Object.assign({}, OPT_DEFAULTS);
   let onlySession = '';     // the session being shown; empty means all of them
   let sessions = new Map(); // session id -> label for the picker
+  let tagged = false;       // whether the chart was drawn with session tags (more than one session shown)
+  // "Session 2" when several sessions share the chart, so two Claudes are never mistaken for one
+  function sessionTag(id) {
+    if (onlySession || sessions.size < 2) return '';
+    let i = 0;
+    for (const k of sessions.keys()) { i++; if (k === id) return 'Session ' + i; }
+    return '';
+  }
 
   const TOOL_LABEL = { run: 'Shell', search: 'Search', web: 'Web', mcp: 'Connector', other: 'Other', spawn: 'Agents', plan: 'Plan', tasks: 'Tasks' };
   const VERB = { read: 'read', edit: 'editing', write: 'writing', run: 'ran', search: 'searched', web: 'web', spawn: 'started agent', mcp: 'used', other: 'used', plan: 'proposed a plan:', tasks: 'task list,' };
@@ -109,6 +119,7 @@
 
   function sessionNode(e) {
     const n = node('s:' + e.session, 'main', 'Claude', null);
+    n.session = e.session;
     return n;
   }
 
@@ -124,6 +135,7 @@
     const model = req && req.model ? req.model : null;
     n = node(id, 'agent', (e.agentType || 'agent') + (model ? ' · ' + model : ''), parent);
     n.model = model;
+    n.session = e.session;
     n.info = req ? req.desc : '';
     n.spawnKey = req ? req.key : null;
     n.status = 'running';
@@ -254,6 +266,32 @@
   // ---------- flowchart: boxes in order, one column per agent, one section per turn ----------
   const flowEl = $('flow');
   const flowGrid = $('flowGrid');
+  const answerBar = document.createElement('div'); answerBar.id = 'answerBar'; answerBar.hidden = true;
+  answerBar.title = 'Click to show the whole answer, or to shrink it again';
+  const answerHead = document.createElement('div'); answerHead.className = 'ah';
+  const answerLabel = document.createElement('b'); answerLabel.textContent = "Claude's answer";
+  const answerWhich = document.createElement('span'); answerWhich.className = 'which';
+  answerHead.append(answerLabel, answerWhich);
+  const answerText = document.createElement('div'); answerText.className = 'txt';
+  answerBar.append(answerHead, answerText);
+  stage.append(answerBar);
+  let answerTurn = null;   // the request whose answer the banner shows
+
+  function placeAnswer() {
+    const show = !!answerTurn && !flowEl.hidden && opts.answer !== false;
+    answerBar.hidden = !show;
+    flowEl.style.top = show ? answerBar.offsetHeight + 'px' : '';
+  }
+
+  function showAnswer(T) {
+    answerTurn = T && T.answer ? T : null;
+    if (answerTurn) {
+      answerText.textContent = clean(answerTurn.answer);   // plain text: no markdown marks
+      answerWhich.textContent = answerTurn.title ? 'to: ' + answerTurn.title : '';
+    }
+    placeAnswer();
+  }
+  answerBar.addEventListener('click', () => { answerBar.classList.toggle('open'); placeAnswer(); });
   const SVGNS = 'http://www.w3.org/2000/svg';
   const KIND = { read: 'Read', edit: 'Edit', write: 'Write', run: 'Shell', search: 'Search', web: 'Web', spawn: 'Start agent', mcp: 'Connector', plan: 'Propose plan', tasks: 'Task list', guard: 'Usage guard' };
   const SNAKE = '<svg class="snake" aria-hidden="true"><rect class="trail" pathLength="100"/><rect class="body" pathLength="100"/><rect class="tip" pathLength="100"/></svg>';
@@ -271,6 +309,7 @@
   function flowReset() {
     turns = []; turnBySession = new Map(); lanes = new Map(); actions = new Map(); timed = new Set();
     flowGrid.textContent = '';
+    showAnswer(null);
   }
 
   // A turn is everything done for one request. Starting a new one folds the previous one away.
@@ -289,15 +328,21 @@
     const body = document.createElement('div'); body.className = 'turnBody';
     const svg = document.createElementNS(SVGNS, 'svg'); svg.setAttribute('class', 'lines');
     const grid = document.createElement('div'); grid.className = 'grid';
-    const ans = document.createElement('div'); ans.className = 'answer'; ans.hidden = true;
-    body.append(svg, grid, ans);
-    el.append(body);
+    body.append(svg, grid);
+    // the card's own caption: with two cards open, or two sessions, the chart alone does not say whose it is
+    const cap = document.createElement('div'); cap.className = 'turnCap';
+    const capQ = document.createElement('span'); capQ.className = 'capQ'; capQ.textContent = prompt || 'Session in progress';
+    const capMeta = document.createElement('span'); capMeta.className = 'capMeta';
+    cap.append(capQ, capMeta);
+    cap.title = prompt || '';
+    el.append(cap, body);
     flowGrid.append(el);
     promptsEl.prepend(head);
     requestsEl.hidden = false;
-    const T = { el, head, meta, svg, grid, ans, lanes: [], seq: 0, actions: 0, agents: 0, dirty: true, t0: 0, t1: 0 };
+    const T = { el, head, meta, capMeta, session: sessionId, svg, grid, body, answer: '', title: prompt || '', lanes: [], seq: 0, actions: 0, agents: 0, dirty: true, t0: 0, t1: 0 };
     head.addEventListener('click', () => {
       const folded = el.classList.toggle('folded');
+      if (T.answer) showAnswer(T);   // the banner follows the request you clicked
       head.setAttribute('aria-expanded', String(!folded));
       lastUserScroll = Date.now();
       T.dirty = true;
@@ -317,6 +362,7 @@
     const parts = [quiet ? 'reply only' : T.actions + (T.actions === 1 ? ' action' : ' actions'),
       T.agents ? T.agents + (T.agents === 1 ? ' sub-agent' : ' sub-agents') : '', took];
     for (const p of parts) { if (!p) continue; const c = document.createElement('span'); c.textContent = p; T.meta.append(c); }
+    T.capMeta.textContent = [sessionTag(T.session)].concat(parts).filter(Boolean).join(' · ');
   }
 
   function fmtDur(ms) {
@@ -342,7 +388,7 @@
     L.from = started && started.b.turn === T ? started.b : null;
     L.boxes = [];
     T.lanes.push(L);
-    const head = flowBox(L, 'head link ' + actor.kind + (actor.model ? ' m-' + modelFamily(actor.model) : ''), actor.kind === 'main' ? 'Claude' : actor.label, actor.info || (actor.kind === 'main' ? 'main agent' : 'sub-agent'));
+    const head = flowBox(L, 'head link ' + actor.kind + (actor.model ? ' m-' + modelFamily(actor.model) : ''), actor.kind === 'main' ? 'Claude' : actor.label, actor.info || (actor.kind === 'main' ? 'main agent' + (sessionTag(sessionId) ? ' · ' + sessionTag(sessionId) : '') : 'sub-agent'));
     head.el.title = 'Click to show this agent in the graph';
     head.el.addEventListener('click', () => showInGraph(actor.id));
     if (actor.kind !== 'main') { T.agents++; turnMeta(T); }
@@ -374,42 +420,117 @@
 
   // Compact: each column packs its own boxes. Aligned: every box takes the row of its position in
   // time, so boxes side by side really did happen in that order.
+  // The chart reads from top to bottom in time. Claude's own steps are wide boxes across the whole
+  // chart. When Claude starts agents, each gets a column under a small "Start agent" box, the agents
+  // run side by side, and their columns join again in Claude's next wide box.
   function layout(T) {
     T.dirty = false;
     const COL = 260, GAP = 56;
-    const place = (L, start) => {
-      let r = start, last = start;
-      for (const b of L.boxes) {
-        const row = ui.align ? b.seq : r++;
-        if (b.row !== row) { b.row = row; b.el.style.gridRow = String(row); }
-        last = row;
-      }
-      return last;
-    };
+    const setRow = (b, row) => { if (b.row !== row) { b.row = row; b.el.style.gridRow = String(row); } };
     const main = T.lanes.find((L) => L.actor.kind === 'main');
-    if (main) place(main, 1);
-    // A column is free again once the agent in it finished before this one started.
-    const slots = [];
-    for (const L of T.lanes) {
-      if (L === main) continue;
-      const want = L.from ? L.from.row : 1;
-      let i = slots.findIndex((x) => x.t1 && L.t0 && x.t1 <= L.t0);
-      if (i < 0) { i = slots.length; slots.push({ end: 0, t1: 0 }); }
-      L.slot = i;
-      slots[i].end = place(L, Math.max(want, slots[i].end + 1));
-      slots[i].t1 = L.t1;
+    const agents = T.lanes.filter((L) => L !== main);
+    for (const L of agents) { L.join = null; L.wave = null; }
+    const waves = [];
+    let row = 0, wave = null, columns = 1;
+
+    // put a wave's agents side by side under its Start agent boxes; returns the last row used
+    const closeWave = (W) => {
+      const lanes = [];
+      for (const fb of W.forks) { const L = agents.find((x) => x.from === fb); fb.slot = lanes.length; lanes.push(L || null); }
+      for (const L of agents) if (L.wave === W && !lanes.includes(L)) lanes.push(L);   // agents with no Start box of their own
+      W.lanes = lanes.filter(Boolean);
+      columns = Math.max(columns, lanes.length);
+      let end = W.row;
+      lanes.forEach((L, slot) => { if (L) L.slot = slot; });
+      if (ui.align) {
+        // rows follow the order things happened across all the wave's agents
+        const all = [];
+        for (const L of W.lanes) for (const b of L.boxes) all.push(b);
+        all.sort((a, b) => a.seq - b.seq).forEach((b, i) => { setRow(b, W.row + 1 + i); end = W.row + 1 + i; });
+      } else {
+        for (const L of W.lanes) { let r = W.row; for (const b of L.boxes) setRow(b, ++r); end = Math.max(end, r); }
+      }
+      return end;
+    };
+
+    const mainBoxes = main ? main.boxes : [];
+    // an agent whose Start box is not in Claude's column belongs to the wave running when it began
+    const waveOf = new Map();
+    {
+      let W = null, inWave = false;
+      for (const b of mainBoxes) {
+        if (b.spawn) { if (!inWave) { W = { forks: [], row: 0, lanes: [] }; waves.push(W); inWave = true; } W.forks.push(b); waveOf.set(b, W); }
+        else inWave = false;
+      }
+      for (const L of agents) {
+        if (L.from && waveOf.has(L.from)) { L.wave = waveOf.get(L.from); continue; }
+        const first = L.boxes[0] ? L.boxes[0].seq : 0;
+        let best = null;
+        for (const X of waves) if (X.forks.length && X.forks[0].seq <= first) best = X;   // the "loose" wave has no Start box
+        if (!best) { if (!waves.length || waves[0].forks.length) waves.unshift({ forks: [], row: 0, lanes: [] }); best = waves[0]; }
+        L.wave = best;
+      }
     }
-    const left = Math.floor(slots.length / 2);
-    const mainCol = left + 1;
-    const columnCount = slots.length + 1;
-    T.grid.style.gridTemplateColumns = 'repeat(' + columnCount + ', ' + COL + 'px)';
-    T.grid.style.width = Math.max(flowEl.clientWidth - 68, columnCount * COL + (columnCount - 1) * GAP) + 'px';
+
+    const wide = [];
+    const loose = waves.length && !waves[0].forks.length ? waves[0] : null;   // agents seen before any Start box
+    for (const b of mainBoxes) {
+      if (b.spawn) {
+        const W = waveOf.get(b);
+        if (wave !== W) { if (wave) row = closeWave(wave); wave = W; W.row = ++row; }
+        b.fork = true; setRow(b, W.row);
+      } else {
+        if (wave) {
+          row = closeWave(wave);
+          for (const L of wave.lanes) L.join = b;
+          wave = null;
+        }
+        b.fork = false; setRow(b, ++row); wide.push(b);
+        if (loose && b === mainBoxes[0]) { loose.row = row; row = closeWave(loose); }
+      }
+    }
+    if (wave) closeWave(wave);
+    if (!main && loose) { loose.row = 0; closeWave(loose); }
+
+    // with three or more columns Claude's own boxes span them all, so every column's arrow meets a box
+    T.grid.classList.toggle('many', columns > 2);
+    T.grid.style.gridTemplateColumns = 'repeat(' + columns + ', ' + COL + 'px)';
+    T.natural = columns * COL + (columns - 1) * GAP;
+    T.grid.style.width = Math.max(flowEl.clientWidth - 68, T.natural) + 'px';
     T.grid.style.justifyContent = 'center';
-    for (const L of T.lanes) {
-      // columns alternate right, left, right... of Claude
-      L.col = L === main ? mainCol : L.slot % 2 === 0 ? mainCol + L.slot / 2 + 1 : mainCol - (L.slot + 1) / 2;
-      for (const b of L.boxes) b.el.style.gridColumn = String(L.col);
+    T.fitPending = true;
+    for (const b of wide) { b.el.style.gridColumn = '1 / -1'; b.el.classList.remove('fork'); }
+    for (const W of waves) {
+      // a wave with fewer agents than the chart has columns sits in the middle
+      const n = Math.max(W.forks.length, W.lanes.reduce((m, L) => Math.max(m, L.slot + 1), 0));
+      const off = Math.floor((columns - n) / 2);
+      for (const fb of W.forks) { fb.el.style.gridColumn = String(off + fb.slot + 1); fb.el.classList.add('fork'); }
+      for (const L of W.lanes) for (const b of L.boxes) b.el.style.gridColumn = String(off + L.slot + 1);
     }
+  }
+
+  // Fit to width: a request's chart is shrunk until its full width fits the space its card leaves for it,
+  // never enlarged. Height is left alone, so a long chart scrolls down at a readable size. The chart and its
+  // arrows are scaled together, so the arrows keep their proportions.
+  function fitTurn(T) {
+    T.fitPending = false;
+    const g = T.grid.style, v = T.svg.style;
+    g.width = T.natural + 'px';
+    const H = T.grid.scrollHeight || 1;
+    // The room the panel leaves for the chart. It is measured from the scrolling view, not from the
+    // card: the card grows with its chart, so measuring the card never let the chart shrink.
+    const px = (el) => { const c = getComputedStyle(el); return parseFloat(c.paddingLeft) + parseFloat(c.paddingRight) + parseFloat(c.borderLeftWidth) + parseFloat(c.borderRightWidth); };
+    const availW = Math.max(120, flowEl.clientWidth - px(flowGrid.parentElement) - px(T.el) - px(T.body));
+    // Below this scale the text is too small to read: the chart then keeps this size, starts at the
+    // left edge and scrolls sideways.
+    const k = Math.max(0.6, Math.min(1, availW / T.natural));
+    const dx = Math.max(0, (availW - T.natural * k) / 2);
+    const tf = 'translateX(' + dx.toFixed(1) + 'px) scale(' + k.toFixed(4) + ')';
+    g.transformOrigin = '0 0'; g.transform = tf;
+    // a scaled box still takes its full size in the page, so give the spare room back
+    g.marginBottom = (-(H * (1 - k))).toFixed(1) + 'px';
+    g.marginRight = (-(T.natural * (1 - k)) + dx).toFixed(1) + 'px';
+    v.transformOrigin = '0 0'; v.transform = tf;
   }
 
   // Claude's own column ends in one status box. While nothing else happens in the column it is
@@ -483,10 +604,15 @@
     if (!(b && gk && opts.group && b.gk === gk)) {
       b = flowBox(L, 'act k-' + e.action, KIND[e.action] || NICE[e.tool] || e.tool || 'Tool', '');
       b.gk = gk;
+      b.spawn = e.action === 'spawn';
       const box = b;
       b.el.addEventListener('click', (ev) => {
         if (box.items.length > 1) { box.expanded = !box.expanded; lastUserScroll = Date.now(); hideTip(); render(box); }
         else openItem(box.items[0], ev);
+      });
+      b.el.addEventListener('keydown', (ev) => {
+        if (ev.target !== box.el || (ev.key !== 'Enter' && ev.key !== ' ')) return;
+        ev.preventDefault(); box.el.click();
       });
       b.el.addEventListener('mouseenter', () => { if (box.items.length === 1) showDiff(box.el, box.items[0]); });
       b.el.addEventListener('mouseleave', hideTip);
@@ -531,7 +657,10 @@
     b.el.classList.toggle('fail', fails > 0);
     b.el.classList.toggle('group', n > 1);
     b.el.classList.toggle('open', open);
-    b.el.classList.toggle('link', n > 1 || !!last.file || last.planLink);
+    const acts = n > 1 || !!last.file || last.planLink;
+    b.el.classList.toggle('link', acts);
+    if (acts) { b.el.tabIndex = 0; b.el.setAttribute('role', 'button'); if (n > 1) b.el.setAttribute('aria-expanded', String(open)); else b.el.removeAttribute('aria-expanded'); }
+    else { b.el.removeAttribute('tabindex'); b.el.removeAttribute('role'); }
     b.el.title = n > 1 ? (open ? 'Click to collapse' : 'Click to show all ' + n + ':\n' + b.items.map((i) => i.text).join('\n'))
       : last.diff ? '' : b.kind + ' ' + last.text + (last.more ? '\n' + last.more : '') + (last.sub ? '\n' + last.sub : '') + (last.file ? '\nClick to open, Shift+click to show in the graph' : last.planLink ? '\nClick to see the plan as a flowchart' : '');
     boxTime(b);
@@ -579,15 +708,18 @@
       }
       tip.append(pre);
     }
-    tip.hidden = false;
     const s0 = stage.getBoundingClientRect(), r = anchor.getBoundingClientRect();
+    // never bigger than the panel: in a narrow side bar the 520px tip used to hang off the edge
+    tip.style.maxWidth = Math.max(140, s0.width - 16) + 'px';
+    tip.style.maxHeight = Math.max(80, s0.height - 16) + 'px';
+    tip.hidden = false;
     let x = r.right - s0.left + 12;
     if (x + tip.offsetWidth > s0.width - 8) x = Math.max(8, r.left - s0.left - tip.offsetWidth - 12);
     const y = Math.max(8, Math.min(r.top - s0.top, s0.height - tip.offsetHeight - 8));
     tip.style.left = x + 'px'; tip.style.top = y + 'px';
   }
 
-  function hideTip() { tip.hidden = true; tip.className = ''; }
+  function hideTip() { tip.hidden = true; tip.className = ''; tip.style.maxWidth = ''; tip.style.maxHeight = ''; }
 
   function flowApply(e, actor, session, live) {
     let made = null;
@@ -595,7 +727,8 @@
     if (isAuto(e) && turnBySession.get(e.session)) {
       const L = flowLane(session, e.session);
       const n = agentsRunning(e.session);
-      made = statusBox(L, autoLabel(e), n ? n + (n === 1 ? ' agent' : ' agents') + ' still working' : '', 'note');
+      const reported = /^\s*<agent-message/.test(e.detail || '');
+      made = statusBox(L, reported && !n ? 'Agents reported back' : autoLabel(e), n ? n + (n === 1 ? ' agent' : ' agents') + ' still working' : '', 'note');
       setCurrent(L, made);
     } else if (e.ev === 'UserPromptSubmit') {
       const T = newTurn(e.session, isAuto(e) ? autoLabel(e) : promptText(e.detail));
@@ -620,12 +753,7 @@
         const n = agentsRunning(e.session);
         made = n ? statusBox(L, 'Waiting for ' + n + (n === 1 ? ' agent' : ' agents'), '', 'gather') : statusBox(L, 'Finished the turn', '', '');
       } else made = flowBox(L, 'term' + (e.detail ? ' said' : ''), 'Finished', e.detail || '');
-      if (mainStop && e.detail) {
-        const A = L.turn.ans; A.textContent = '';
-        const h = document.createElement('b'); h.textContent = "Claude's answer";
-        const p = document.createElement('span'); p.textContent = e.detail;
-        A.append(h, p); A.hidden = false;
-      }
+      if (mainStop && e.detail) { L.turn.answer = e.detail; showAnswer(L.turn); }
       setCurrent(L, null);
       if (e.ev === 'Stop') { L.turn.t1 = e.t; turnMeta(L.turn); }
     } else if (e.ev === 'PreToolUse' && e.action === 'tasks') {
@@ -656,7 +784,7 @@
       if (!AL.t0) AL.t0 = e.t;
       if (e.ev === 'SubagentStop') { AL.t1 = e.t; AL.turn.dirty = true; queueLines(); }
     }
-    if (made && live && Date.now() - lastUserScroll > 4000 && !flowEl.hidden) {
+    if (made && live && opts.follow !== false && Date.now() - lastUserScroll > 4000 && !flowEl.hidden) {
       made.el.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
     }
   }
@@ -694,38 +822,65 @@
     for (const T of turns) {
       if (T.el.classList.contains('folded')) continue;
       if (T.dirty) layout(T);
+      if (T.fitPending) fitTurn(T);
       T.svg.setAttribute('width', T.grid.scrollWidth);
       T.svg.setAttribute('height', T.grid.scrollHeight);
       T.svg.textContent = '';
+      const seqLine = (L, fromEl, c) => {
+        const ce = c.el;
+        const x = ce.offsetLeft + ce.offsetWidth / 2, y1 = fromEl.offsetTop + fromEl.offsetHeight, y2 = ce.offsetTop;
+        if (y2 - y1 < 4) return;
+        const on = L.cur === c;
+        const colour = on ? getComputedStyle(ce).getPropertyValue('--accent') : '';
+        svgPath(T, 'M' + x + ' ' + y1 + ' V' + (y2 - 6), 'seq' + (on ? ' on' : ''), colour);
+        svgPath(T, 'M' + x + ' ' + y2 + ' l-4.5 -7 h9 z', 'seqHead' + (on ? ' on' : ''), colour);
+      };
       for (const L of T.lanes) {
+        const isMain = L.actor.kind === 'main';
+        let anchor = L.boxes[0];   // the last wide box in Claude's column
         for (let i = 1; i < L.boxes.length; i++) {
-          const p = L.boxes[i - 1].el, c = L.boxes[i].el;
-          const x = c.offsetLeft + c.offsetWidth / 2, y1 = p.offsetTop + p.offsetHeight, y2 = c.offsetTop;
-          const on = L.cur === L.boxes[i];
-          const colour = on ? getComputedStyle(c).getPropertyValue('--accent') : '';
-          svgPath(T, 'M' + x + ' ' + y1 + ' V' + (y2 - 6), 'seq' + (on ? ' on' : ''), colour);
-          svgPath(T, 'M' + x + ' ' + y2 + ' l-4.5 -7 h9 z', 'seqHead' + (on ? ' on' : ''), colour);
+          const p = L.boxes[i - 1], c = L.boxes[i];
+          if (isMain && c.fork) { seqLine(L, anchor.el, c); continue; }
+          if (isMain) anchor = c;
+          if (isMain && p.fork && T.lanes.some((X) => X.join === c)) continue;   // joined from the agents' columns below
+          seqLine(L, p.el, c);
         }
         if (L.from && L.boxes.length) {
           const a = L.from.el, b = L.boxes[0].el;
-          const right = b.offsetLeft > a.offsetLeft;
-          const dir = right ? 1 : -1;
-          const x1 = right ? a.offsetLeft + a.offsetWidth : a.offsetLeft;
-          const y1 = a.offsetTop + a.offsetHeight / 2;
-          const x2 = right ? b.offsetLeft - 7 : b.offsetLeft + b.offsetWidth + 7;
-          const y2 = b.offsetTop + b.offsetHeight / 2;
-          const far = Math.abs(x2 - x1) > 120;
-          const gy = a.offsetTop - 11;
-          svgPath(T, far
-            ? 'M' + x1 + ' ' + y1 + ' h' + (dir * 14) + ' V' + gy + ' H' + (x2 - dir * 14) + ' V' + y2 + ' H' + x2
-            : 'M' + x1 + ' ' + y1 + ' h' + (dir * 14) + ' V' + y2 + ' H' + x2, 'spawn');
-          svgPath(T, 'M' + x2 + ' ' + y2 + ' l' + (dir * -7) + ' -4.5 v9 z', 'spawnHead');
+          if (Math.abs(a.offsetLeft - b.offsetLeft) < 6) {
+            // same column: straight down from the Start agent box
+            const x = b.offsetLeft + b.offsetWidth / 2, y1 = a.offsetTop + a.offsetHeight, y2 = b.offsetTop;
+            if (y2 - y1 >= 4) {
+              svgPath(T, 'M' + x + ' ' + y1 + ' V' + (y2 - 7), 'spawn');
+              svgPath(T, 'M' + x + ' ' + y2 + ' l-4.5 -8 h9 z', 'spawnHead');
+            }
+          } else {
+            const right = b.offsetLeft > a.offsetLeft;
+            const dir = right ? 1 : -1;
+            const x1 = right ? a.offsetLeft + a.offsetWidth : a.offsetLeft;
+            const y1 = a.offsetTop + a.offsetHeight / 2;
+            const x2 = right ? b.offsetLeft - 7 : b.offsetLeft + b.offsetWidth + 7;
+            const y2 = b.offsetTop + b.offsetHeight / 2;
+            svgPath(T, 'M' + x1 + ' ' + y1 + ' h' + (dir * 14) + ' V' + y2 + ' H' + x2, 'spawn');
+            svgPath(T, 'M' + x2 + ' ' + y2 + ' l' + (dir * -7) + ' -4.5 v9 z', 'spawnHead');
+          }
+        }
+        if (!isMain && L.join && L.boxes.length) {
+          // this agent's column runs into Claude's next wide box
+          const last = L.boxes[L.boxes.length - 1].el, j = L.join.el;
+          const x = last.offsetLeft + last.offsetWidth / 2, y1 = last.offsetTop + last.offsetHeight, y2 = j.offsetTop;
+          if (y2 - y1 >= 4) {
+            svgPath(T, 'M' + x + ' ' + y1 + ' V' + (y2 - 6), 'seq');
+            svgPath(T, 'M' + x + ' ' + y2 + ' l-4.5 -7 h9 z', 'seqHead');
+          }
         }
       }
     }
   }
   flowEl.addEventListener('wheel', () => { lastUserScroll = Date.now(); }, { passive: true });
   flowEl.addEventListener('pointerdown', () => { lastUserScroll = Date.now(); });
+  // scrolling with the keyboard also means "I am reading here, do not jump to the newest box"
+  flowEl.addEventListener('keydown', () => { lastUserScroll = Date.now(); });
 
   // ---------- moving between the two views ----------
   function showInGraph(id) {
@@ -757,72 +912,184 @@
   const planEl = $('plan');
   let plans = new Map();   // session id -> { plan: {title, steps, state}, tasks: [] }
 
-  function planReset() { plans = new Map(); renderPlans(); }
-
-  function clean(text) {
-    return text.replace(/\[([^\]]+)\]\([^)]*\)/g, '$1').replace(/[*_`]+/g, '').replace(/^\[[ xX]\]\s*/, '').trim();
+  // what the person opened or closed in the Plan view; kept while the board is drawn again
+  const planUi = { open: new Set(), phases: new Map(), now: '' };
+  let plansQueued = false;
+  function queuePlans() {
+    if (plansQueued) return;
+    plansQueued = true;
+    requestAnimationFrame(() => { plansQueued = false; renderPlans(); });
   }
 
-  // Turns the plan's markdown into steps: numbered items first, then bullets, then headings.
+  function planReset() { plans = new Map(); renderPlans(); }
+
+  // a short word on the Refresh button about what the refresh found
+  let planNoteTimer = null;
+  function planNote(text) {
+    clearTimeout(planNoteTimer);
+    planUi.note = text;
+    renderPlans();
+    planNoteTimer = setTimeout(() => { planUi.note = ''; const b = document.getElementById('planRefresh'); if (b) b.textContent = 'Refresh'; }, 2500);
+  }
+
+  function clean(text) {
+    return text.replace(/\[([^\]]+)\]\([^)]*\)/g, '$1').replace(/\x60/g, '').replace(/\*\*|__/g, '').replace(/(^|[\s(])[*_](?=\S)/g, '$1').replace(/([^\s*_])[*_](?=[\s),:;]|\.(?:\s|$)|$)/g, '$1').replace(/^\[[ xX]\]\s*/, '').trim();
+  }
+
+  // Turns any plan's markdown into steps grouped by phase. The rules, in order:
+  //  1. The first "# heading" is the title. Fenced code, tables and rules are skipped.
+  //  2. Every other heading starts a section. Sections named like Context, Summary, Assumptions or
+  //     Notes are background: their first paragraph introduces the board, and they hold no steps.
+  //  3. If the plan has numbered items, those are the steps; each section holding some is a phase.
+  //  4. Otherwise, if it has "Step 1: ..." style headings, each such heading is a step and the
+  //     heading above them is the phase.
+  //  5. Otherwise the top-level bullets of each section are the steps.
+  //  6. Otherwise each heading is a step, and failing that each paragraph.
+  //  Nested items become a step's details. Bullets under Verification or Testing are check steps.
+  //  A step's status comes from a mark at its start: "[x]" done, "[~]" in progress, "[ ]" or none to do.
+  const INFO_HEAD = /^(context|summary|background|goals?|why|overview|motivation|problem|assumptions?|notes?|risks?|out of scope|non-goals?|open questions?|questions?|critical files|files|references?)\b/i;
+  const CHECK_HEAD = /\b(verification|verify|testing|tests?|test plan|validation|acceptance|done when|how to test|qa)\b/i;
+  const STEP_HEAD = /^(?:(?:step|phase|task|part|stage)\s*)?(\d+)\s*[.:)\-–]\s*(.+)$/i;
+
   function parsePlan(md) {
-    const lines = md.split('\n');
+    const lines = String(md).replace(/\r\n/g, '\n').split('\n');
     let title = '';
-    const heads = [], items = [];
-    let phase = '';
+    let sec = { text: '', items: [], paras: [] };
+    const secs = [sec];
+    let fence = false, last = null;
     for (const raw of lines) {
+      if (/^\s*(\x60{3,}|~{3,})/.test(raw)) { fence = !fence; continue; }
+      if (fence) continue;
       const h = raw.match(/^\s{0,3}(#{1,6})\s+(.*)$/);
       if (h) {
-        const text = clean(h[2]);
+        const text = clean(h[2].replace(/\s+#+\s*$/, ''));
         if (h[1].length === 1 && !title) { title = text; continue; }
-        phase = text; heads.push({ text, details: [] });
+        sec = { text, items: [], paras: [] }; secs.push(sec); last = null;
         continue;
       }
+      if (/^\s*\|/.test(raw) || /^\s*([-*_]\s*){3,}$/.test(raw)) continue;   // tables and horizontal rules
       const li = raw.match(/^(\s*)(\d+[.)]|[-*+])\s+(.*)$/);
       if (li) {
-        items.push({ indent: li[1].replace(/\t/g, '    ').length, numbered: /\d/.test(li[2]), text: clean(li[3]), phase, details: [] });
-      } else if (raw.trim() && heads.length) {
-        heads[heads.length - 1].details.push(clean(raw));
+        const box = li[3].match(/^\[([ xX~>\-\/])\]\s*/);
+        const body = li[3].replace(/^\[[ xX~>\-\/]\]\s*/, '');
+        const mark = box ? box[1] : '';
+        last = { indent: li[1].replace(/\t/g, '    ').length, numbered: /\d/.test(li[2]), text: clean(body), raw: body, status: /[xX]/.test(mark) ? 'completed' : mark && mark !== ' ' ? 'in_progress' : 'pending', marked: !!box, details: [] };
+        sec.items.push(last);
+      } else if (raw.trim()) {
+        if (last && /^\s{2,}\S/.test(raw)) { last.text += ' ' + clean(raw); last.raw += ' ' + raw.trim(); }   // a wrapped list line
+        else { sec.paras.push(clean(raw)); last = null; }
       }
     }
+
+    const mk = (it, phase, check) => ({ text: it.text, raw: it.raw, phase, details: it.details, status: it.status, marked: it.marked, check: !!check });
+    // a section's steps: its shallowest items; anything nested under one becomes that step's details
+    const topItems = (S, onlyNumbered) => {
+      const cand = onlyNumbered ? S.items.filter((i) => i.numbered) : S.items;
+      if (!cand.length) return [];
+      const top = Math.min(...cand.map((i) => i.indent));
+      const out = [];
+      for (const i of S.items) {
+        if (i.indent <= top && (!onlyNumbered || i.numbered)) { i.details = []; out.push(i); }
+        else if (out.length) out[out.length - 1].details.push(i.text);
+      }
+      return out;
+    };
+    const isCheck = (S) => CHECK_HEAD.test(S.text) && !INFO_HEAD.test(S.text);
+
     let steps = [];
-    const numbered = items.filter((i) => i.numbered);
-    const pool = numbered.length >= 2 ? items.filter((i) => i.numbered || i.indent > Math.min(...numbered.map((n) => n.indent))) : items;
-    if (pool.length >= 2) {
-      const top = Math.min(...(numbered.length >= 2 ? numbered : pool).map((i) => i.indent));
-      for (const i of pool) {
-        if (i.indent <= top && (numbered.length < 2 || i.numbered)) steps.push({ text: i.text, phase: i.phase, details: [], status: 'pending' });
-        else if (steps.length) steps[steps.length - 1].details.push(i.text);
+    const numbered = secs.reduce((n, S) => n + S.items.filter((i) => i.numbered).length, 0);
+    const stepHeads = secs.filter((S) => STEP_HEAD.test(S.text));
+    if (numbered >= 2) {
+      for (const S of secs) {
+        if (S.items.some((i) => i.numbered)) for (const i of topItems(S, true)) steps.push(mk(i, S.text, isCheck(S)));
+        else if (isCheck(S)) for (const i of topItems(S, false)) steps.push(mk(i, S.text, true));
       }
-    } else if (heads.length >= 2) {
-      steps = heads.map((h) => ({ text: h.text, phase: '', details: h.details.slice(0, 3), status: 'pending' }));
+    } else if (stepHeads.length >= 2) {
+      let phase = '';
+      for (const S of secs) {
+        const m = S.text.match(STEP_HEAD);
+        if (m) {
+          const details = S.items.map((i) => i.text).concat(S.paras).slice(0, 8);
+          const hb = m[2].match(/^\[([ xX~>\-\/])\]\s*/);
+          const name = hb ? m[2].slice(hb[0].length) : m[2];
+          const hs = !hb || hb[1] === ' ' ? 'pending' : /[xX]/.test(hb[1]) ? 'completed' : 'in_progress';
+          steps.push({ text: name, title: name, raw: '', phase, details, status: hs, marked: !!hb, kindText: name + ' ' + details.join(' ') });
+        } else if (S.text && !INFO_HEAD.test(S.text)) {
+          phase = S.text;
+          if (isCheck(S)) for (const i of topItems(S, false)) steps.push(mk(i, S.text, true));
+        }
+      }
     } else {
-      steps = lines.map((l) => clean(l)).filter(Boolean).slice(0, 12).map((text) => ({ text, phase: '', details: [], status: 'pending' }));
-      if (steps.length && !title && steps.length > 1) title = '';
+      const withItems = secs.filter((S) => S.items.length);
+      const work = withItems.filter((S) => !INFO_HEAD.test(S.text));
+      const use = work.length ? work : withItems;
+      if (use.reduce((n, S) => n + S.items.length, 0) >= 2) {
+        for (const S of use) for (const i of topItems(S, false)) steps.push(mk(i, S.text, isCheck(S)));
+      } else {
+        const heads = secs.filter((S) => S.text && !INFO_HEAD.test(S.text));
+        if (heads.length >= 2) {
+          steps = heads.map((S) => {
+            const details = S.paras.concat(S.items.map((i) => i.text)).slice(0, 4);
+            return { text: S.text, title: S.text, raw: '', phase: '', details, status: 'pending', kindText: S.text + ' ' + details.join(' '), check: isCheck(S) };
+          });
+        } else {
+          const paras = secs.reduce((a, S) => a.concat(S.paras), []);
+          steps = paras.slice(0, 12).map((text) => ({ text, raw: '', phase: '', details: [], status: 'pending' }));
+        }
+      }
     }
-    return { title: title || 'Proposed plan', steps: steps.slice(0, 40) };
+    // the opening paragraph: from a background section, else whatever comes before the first heading
+    const lead = secs.find((S) => INFO_HEAD.test(S.text) && S.paras.length) || (secs[0].paras.length && steps.length && steps[0].text !== secs[0].paras[0] ? secs[0] : null);
+    return { title: title || 'Proposed plan', steps: steps.slice(0, 60), intro: lead ? lead.paras[0] : '' };
   }
 
   function planFor(sessionId) {
     let S = plans.get(sessionId);
-    if (!S) { S = { plan: null, tasks: [] }; plans.set(sessionId, S); }
+    if (!S) { S = { plan: null, tasks: [], work: [], n: 0, id: sessionId }; plans.set(sessionId, S); }
     return S;
   }
 
   function planApply(e, live) {
     if (e.ev === 'UserPromptSubmit' || e.ev === 'Stop') {
       const S = plans.get(e.session);
-      if (S && S.plan && S.plan.state === 'waiting') { S.plan.state = 'changes'; renderPlans(); }
+      if (!S || !S.plan) return;
+      if (S.plan.state === 'waiting') { S.plan.state = 'changes'; queuePlans(); }
+      // the turn carrying out an approved plan has ended: the step being worked on is finished too
+      else if (S.plan.state === 'approved') { S.plan.ended = e.ev === 'Stop' && S.work.length > 0; queuePlans(); }
       return;
+    }
+    if (e.planUpdate) {
+      const S0 = planFor(e.session);
+      const old = S0.plan;
+      // Claude Code writes the plan file while still in plan mode: that is a draft, not an approval
+      S0.plan = parsePlan(e.planUpdate); S0.plan.state = old ? old.state : 'draft'; S0.plan.ended = old ? old.ended : false;
+      queuePlans();
+      return;
+    }
+    // Work done after approval, for steps nobody reports on: which files were read and edited, in order.
+    if (e.ev === 'PreToolUse' && e.file && (e.action === 'read' || e.action === 'edit' || e.action === 'write')) {
+      const S2 = plans.get(e.session);
+      if (S2 && S2.plan && S2.plan.state === 'approved') {
+        S2.work.push({ f: String(e.file).replace(/\\/g, '/').toLowerCase(), edit: e.action !== 'read', n: ++S2.n });
+        if (S2.work.length > 600) S2.work.shift();
+        S2.plan.ended = false;
+        queuePlans();
+      }
     }
     if (e.action !== 'plan' && e.action !== 'tasks') return;
     const S = planFor(e.session);
     if (e.action === 'plan') {
       if (e.ev === 'PreToolUse' || e.ev === 'PermissionRequest') {
-        if (e.plan) { S.plan = parsePlan(e.plan); S.plan.state = 'waiting'; }
+        if (e.plan) {
+          S.plan = parsePlan(e.plan); S.plan.state = 'waiting';
+          // tasks from before this plan belong to earlier work: they must not tick off its steps
+          for (const t of S.tasks) t.old = true;
+          S.work = [];
+        }
         else if (!S.plan) S.plan = { title: 'Proposed plan', steps: [], state: 'waiting' };
         else S.plan.state = 'waiting';
         if (live && opts.autoPlan && e.ev === 'PreToolUse') { ui.view = 'plan'; applyUi(); }
-      } else if (e.ev === 'PostToolUse' && S.plan) S.plan.state = 'approved';
+      } else if (e.ev === 'PostToolUse' && S.plan) { S.plan.state = 'approved'; S.plan.ended = false; S.work = []; }
       else if (e.ev === 'PostToolUseFailure' && S.plan) S.plan.state = 'changes';
     } else if (e.todos && e.ev === 'PreToolUse') {
       S.tasks = e.todos.map((t, i) => ({ id: String(i + 1), text: t.text, details: [], status: t.status }));
@@ -840,73 +1107,313 @@
         else { if (e.task.status) t.status = e.task.status; if (e.task.subject) t.text = e.task.subject; }
       }
     } else return;
-    renderPlans();
+    queuePlans();
   }
 
-  function planChart(title, stateText, stateCls, steps, word) {
+  // What kind of action a step is, from its wording. The colour of its card follows.
+  const PLAN_KINDS = {
+    read: ['Read', 'Look at code or data'],
+    edit: ['Change', 'Add or change code'],
+    run: ['Run / test', 'Run something and check the result'],
+    setup: ['Set up', 'Copy, install, back up or build'],
+    decide: ['Decide', 'A choice, or a step that depends on a result'],
+  };
+  const PLAN_WORDS = {
+    run: /\b(run|re-run|rerun|test|tests|unit tests?|verify|check|back-test|backtest|replay|measure|confirm that|validate|ensure|lint|benchmark|profile|reproduce|smoke|execute|try)\b/gi,
+    edit: /\b(add|change|edit|implement|fix|update|write|create|record|remove|refactor|rename|append|keep|extend|replace|treat|fit|introduce|wire|move|extract|delete|drop|expose|handle|support|modify|convert|split|make|wrap|store|emit|render|parse|document|define|adapt|rewrite|simplify)\b/gi,
+    read: /\b(read|review|inspect|explore|look|compare|analy[sz]e|report|find|list|understand|investigate|audit|trace|identify|locate|map|survey|study|research|gather|collect)\b/gi,
+    setup: /\b(install|copy|back ?up|deploy|build|package|configure|set up|setup|migrate|push|commit|merge|scaffold|init|initiali[sz]e|bootstrap|upgrade|bump|release|publish|tag|enable|register|provision|clone|download|restore|roll ?back|open a pr)\b/gi,
+    decide: /\b(if|decide|choose|adjust|ask|otherwise|depending|agree|pick|whether|evaluate|consider|discuss)\b/gi,
+  };
+  function stepKind(text) {
+    const t = text.replace(/^[^:]{0,60}:\s*/, (m) => (/\(/.test(m) || m.length < 40 ? '' : m));   // skip a "Title (file):" lead
+    const first = (t.match(/^[A-Za-z-]+/) || [''])[0];
+    for (const k of Object.keys(PLAN_WORDS)) { PLAN_WORDS[k].lastIndex = 0; const m = PLAN_WORDS[k].exec(first); if (m && m[0].length === first.length) return k; }
+    let best = 'edit', top = 0;
+    for (const k of ['edit', 'run', 'setup', 'read', 'decide']) {
+      const n = (text.match(PLAN_WORDS[k]) || []).length;
+      if (n > top) { top = n; best = k; }
+    }
+    return best;
+  }
+  // "**Title** (file.js in backticks): what to do" -> title, body and the files it names
+  function stepParts(st) {
+    const raw = st.raw || st.text;
+    const files = [];
+    if (st.title) return { title: st.title, body: '', files };
+    raw.replace(/\x60([^\x60]{2,60})\x60/g, (m, c) => { if (/[./\\]/.test(c) && !/\s/.test(c) && !files.includes(c)) files.push(c); return m; });
+    const m = raw.match(/^\s*\*\*(.+?)\*\*\s*(?:\(([^)]*)\))?\s*[:.]?\s*(.*)$/);
+    if (m) return { title: clean(m[1]), body: clean(m[3]), files };
+    return { title: '', body: st.text, files };
+  }
+
+  // Where a step's status comes from, the same way for every plan:
+  //   1. a mark in the plan itself ([x], [~], [ ]) always wins;
+  //   2. otherwise the session's task list: a task is matched to a step by its number ("3.", "Step 3")
+  //      or, failing that, by sharing most of its words with the step. Several tasks on one step
+  //      make it done only when all of them are.
+  // Returns one status per step and whether it came from the task list.
+  const STOP_WORDS = new Set('the and for with from that this into then when each all any are was will not its their our out over under per via use using new old one two add'.split(' '));
+  function stepWords(text) {
+    return new Set(String(text).toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(' ').filter((w) => w.length >= 3 && !STOP_WORDS.has(w)));
+  }
+  function linkTasks(steps, tasks) {
+    const got = steps.map(() => []);
+    const words = steps.map((s) => stepWords((s.title || '') + ' ' + s.text));
+    for (const t of tasks || []) {
+      let at = -1;
+      const num = String(t.text).match(/^\s*(?:step\s*)?(\d+)\s*(?:[.:)\-–]|\s)/i);
+      if (num && Number(num[1]) >= 1 && Number(num[1]) <= steps.length) at = Number(num[1]) - 1;
+      else {
+        const tw = stepWords(t.text);
+        let best = 0;
+        words.forEach((sw, i) => {
+          let shared = 0;
+          for (const w of tw) if (sw.has(w)) shared++;
+          const score = tw.size ? shared / tw.size : 0;
+          if (shared >= 2 && score >= 0.6 && score > best) { best = score; at = i; }
+        });
+      }
+      if (at >= 0) got[at].push(t.status);
+    }
+    return steps.map((s, i) => {
+      if (s.marked || !got[i].length) return { status: s.status, fromTasks: false };
+      const all = got[i];
+      const status = all.every((x) => x === 'completed') ? 'completed' : all.some((x) => x === 'in_progress' || x === 'completed') ? 'in_progress' : 'pending';
+      return { status, fromTasks: true };
+    });
+  }
+
+  // Steps that neither the plan's own marks nor the task list report on are estimated from the work
+  // itself: a step that names files is "started" once one of them is worked on after approval, and
+  // "likely done" once work has moved on to another step's files or the turn has ended.
+  function stepFiles(st) {
+    const out = new Set();
+    const text = (st.raw || '') + ' ' + (st.text || '') + ' ' + (st.details || []).join(' ');
+    for (const m of text.matchAll(/[\w@.\-\/\\]*[\w\-]\.[A-Za-z][A-Za-z0-9]{0,4}\b/g)) {
+      const f = m[0].replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase();
+      if (/^(e\.g|i\.e|etc\.[a-z]+)$/.test(f) || /^[\d.]+$/.test(f)) continue;
+      out.add(f);
+    }
+    return [...out];
+  }
+  function inferSteps(steps, S) {
+    if (!S.work.length) return steps.map(() => null);
+    const last = steps.map((st) => {
+      const files = stepFiles(st);
+      if (!files.length) return 0;
+      const readStep = stepKind(st.kindText || st.text) === 'read';
+      let n = 0;
+      for (const w of S.work) {
+        if (w.edit === readStep) continue;   // a reading step is followed by reads, any other step by edits
+        if (files.some((f) => w.f === f || w.f.endsWith('/' + f))) n = Math.max(n, w.n);
+      }
+      return n;
+    });
+    const newest = Math.max(...last);
+    return last.map((n) => (!n ? null : { status: n === newest && !S.plan.ended ? 'in_progress' : 'completed', guess: true }));
+  }
+
+  // The plan as a board: one column per phase, read left to right; steps are cards, top to bottom,
+  // coloured by the kind of action.
+  function planChart(title, stateText, stateCls, steps, word, intro, key) {
     const sec = document.createElement('section'); sec.className = 'pchart';
     const head = document.createElement('div'); head.className = 'phead';
     const h = document.createElement('h3'); h.textContent = title;
     const st = document.createElement('span'); st.className = 'pstate ' + stateCls; st.textContent = stateText;
-    head.append(h, st);
-    const flowBoxes = document.createElement('div'); flowBoxes.className = 'pflow';
-    const add = (el) => {
-      if (flowBoxes.children.length) { const a = document.createElement('i'); a.className = 'parrow'; flowBoxes.append(a); }
-      flowBoxes.append(el);
-    };
-    const pill = (text, cls) => { const el = document.createElement('div'); el.className = 'box term ppill ' + (cls || ''); el.textContent = text; return el; };
-    add(pill('Start'));
-    let phase = '';
-    steps.forEach((s2, i) => {
-      if (s2.phase && s2.phase !== phase) {
-        phase = s2.phase;
-        const ph = document.createElement('div'); ph.className = 'phase'; ph.textContent = phase;
-        add(ph);
-      }
-      const done = s2.status === 'completed', doing = s2.status === 'in_progress';
-      const el = document.createElement('div');
-      el.className = 'box pstep ' + (done ? 'done' : doing ? 'doing current' : 'todo');
-      const top = document.createElement('span'); top.className = 'top';
-      const k = document.createElement('span'); k.className = 'kind'; k.textContent = word + ' ' + (i + 1);
-      const d = document.createElement('span'); d.className = 'dur'; d.textContent = done ? 'done' : doing ? 'in progress' : '';
-      top.append(k, d);
-      const t = document.createElement('span'); t.className = 'text'; t.textContent = s2.text;
-      el.append(top, t);
-      if (s2.details && s2.details.length) {
-        const sub = document.createElement('span'); sub.className = 'sub'; sub.textContent = s2.details.join('\n');
-        el.append(sub);
-      }
-      if (doing) el.insertAdjacentHTML('beforeend', SNAKE);
-      add(el);
+    const count = document.createElement('span'); count.className = 'pcount';
+    const done = steps.filter((x) => x.status === 'completed').length;
+    const doingN = steps.filter((x) => x.status === 'in_progress').length;
+    const unit = word === 'Task' ? ['task', 'tasks'] : ['step', 'steps'];
+    count.textContent = [steps.length + ' ' + unit[steps.length === 1 ? 0 : 1], done ? done + ' done' : '', doingN ? doingN + ' in progress' : '',
+      steps.length - done - doingN && (done || doingN) ? (steps.length - done - doingN) + ' to do' : ''].filter(Boolean).join(' · ');
+    head.append(h, st, count);
+    sec.append(head);
+
+    // progress at a glance: done in green, in progress in blue, and what Claude is on now
+    if (steps.length) {
+      const bar = document.createElement('div'); bar.className = 'pbar'; bar.title = done + ' of ' + steps.length + ' done' + (doingN ? ', ' + doingN + ' in progress' : '');
+      bar.setAttribute('role', 'progressbar'); bar.setAttribute('aria-valuemin', '0'); bar.setAttribute('aria-valuemax', String(steps.length)); bar.setAttribute('aria-valuenow', String(done));
+      const a = document.createElement('i'); a.className = 'd'; a.style.width = (done / steps.length * 100).toFixed(1) + '%';
+      const b = document.createElement('i'); b.className = 'p'; b.style.width = (doingN / steps.length * 100).toFixed(1) + '%';
+      bar.append(a, b);
+      sec.append(bar);
+    }
+    if (intro) { const p = document.createElement('p'); p.className = 'pintro'; p.textContent = intro; p.title = intro; sec.append(p); }
+
+    const kinds = steps.map((x) => {
+      const k = stepKind(x.kindText || x.text);
+      return x.check && k === 'edit' ? 'run' : k;   // a check is a test unless its wording says otherwise
     });
-    const allDone = steps.length > 0 && steps.every((x) => x.status === 'completed');
-    add(pill('Done', allDone ? 'reached' : ''));
-    sec.append(head, flowBoxes);
+    const legend = document.createElement('div'); legend.className = 'plegend';
+    for (const k of Object.keys(PLAN_KINDS)) {
+      if (!kinds.includes(k)) continue;
+      const item = document.createElement('span'); item.className = 'k-' + k; item.title = PLAN_KINDS[k][1];
+      const dot = document.createElement('i'); item.append(dot, PLAN_KINDS[k][0]);
+      legend.append(item);
+    }
+    sec.append(legend);
+
+    const board = document.createElement('div'); board.className = 'pboard';
+    const cols = [];
+    const cards = [];
+    steps.forEach((s2, i) => {
+      const name = s2.phase || (word === 'Task' ? 'Tasks' : 'Steps');
+      let col = cols[cols.length - 1];
+      if (!col || col.name !== name) {
+        const el = document.createElement('div'); el.className = 'pcol';
+        const hd = document.createElement('h4');
+        const nm = document.createElement('span'); nm.className = 'pname'; nm.textContent = name;
+        const cnt = document.createElement('span'); cnt.className = 'pcnt';
+        hd.append(nm, cnt);
+        el.append(hd);
+        board.append(el);
+        col = { name, el, hd, cnt, n: 0, done: 0, doing: 0 }; cols.push(col);
+      }
+      const isDone = s2.status === 'completed', doing = s2.status === 'in_progress';
+      col.n++; if (isDone) col.done++; if (doing) col.doing++;
+      const parts = stepParts(s2);
+      const card = document.createElement('div');
+      card.className = 'pcard k-' + kinds[i] + (isDone ? ' done' : doing ? ' doing' : '') + (s2.guess ? ' guess' : '');
+      const top = document.createElement('div'); top.className = 'ptop';
+      const num = document.createElement('span'); num.className = 'pnum'; num.textContent = String(i + 1);
+      const kind = document.createElement('span'); kind.className = 'pkind'; kind.textContent = PLAN_KINDS[kinds[i]][0];
+      const stat = document.createElement('span'); stat.className = 'pstat ' + (isDone ? 'done' : doing ? 'doing' : 'todo') + (s2.guess ? ' guess' : '');
+      stat.textContent = s2.guess ? (isDone ? 'Likely done' : 'Started') : isDone ? 'Done' : doing ? 'In progress' : 'To do';
+      stat.title = s2.guess ? 'Estimated from the files Claude worked on: neither the task list nor a mark in the plan reports on this step'
+        : s2.fromTasks ? 'Status taken from the task list' : s2.marked ? 'Status marked in the plan' : 'No status recorded for this step yet';
+      top.append(num, kind, stat);
+      card.append(top);
+      if (parts.title) { const t = document.createElement('div'); t.className = 'ptitle'; t.textContent = parts.title; card.append(t); }
+      const body = document.createElement('div'); body.className = 'pbody';
+      body.textContent = [parts.body].concat(s2.details || []).filter(Boolean).join('\n');
+      if (body.textContent) card.append(body);
+      if (parts.files.length) {
+        const fl = document.createElement('div'); fl.className = 'pfiles';
+        for (const name2 of parts.files.slice(0, 6)) { const c = document.createElement('code'); c.textContent = name2; fl.append(c); }
+        card.append(fl);
+      }
+      const ck = key + ':' + i;
+      if (planUi.open.has(ck)) card.classList.add('open');
+      card.title = 'Click to show the whole step';
+      card.tabIndex = 0; card.setAttribute('role', 'button');
+      const toggle = () => { if (card.classList.toggle('open')) planUi.open.add(ck); else planUi.open.delete(ck); };
+      card.addEventListener('click', toggle);
+      card.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); toggle(); } });
+      col.el.append(card);
+      cards.push({ card, col, s2, i });
+    });
+    cols.forEach((c, i) => {
+      const allDone = c.n > 0 && c.done === c.n;
+      const pk = key + ':p' + i;
+      const want = planUi.phases.get(pk);
+      // a finished phase folds away by itself; a click on any phase header folds or opens it
+      const closed = want ? want === 'closed' : allDone && opts.foldPhases !== false;
+      c.cnt.textContent = (cols.length > 1 ? 'phase ' + (i + 1) + ' of ' + cols.length + ' · ' : '') + (allDone ? c.n + (c.n === 1 ? ' ' + unit[0] : ' ' + unit[1]) : c.done ? c.done + '/' + c.n + ' done' : c.n + ' ' + unit[c.n === 1 ? 0 : 1]);
+      if (allDone) {
+        c.el.classList.add('alldone');
+        const badge = document.createElement('span'); badge.className = 'pstat done pdone'; badge.textContent = 'Done';
+        c.hd.insertBefore(badge, c.cnt);
+      } else if (c.doing) c.el.classList.add('active');
+      c.el.classList.toggle('collapsed', closed);
+      c.hd.tabIndex = 0; c.hd.setAttribute('role', 'button'); c.hd.setAttribute('aria-expanded', String(!closed));
+      c.hd.title = closed ? 'Click to show the ' + unit[1] + ' of this phase' : 'Click to fold this phase away';
+      const flip = () => {
+        const now = !c.el.classList.contains('collapsed');
+        c.el.classList.toggle('collapsed', now);
+        planUi.phases.set(pk, now ? 'closed' : 'open');
+        c.hd.setAttribute('aria-expanded', String(!now));
+        c.hd.title = now ? 'Click to show the ' + unit[1] + ' of this phase' : 'Click to fold this phase away';
+      };
+      c.hd.addEventListener('click', flip);
+      c.hd.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); flip(); } });
+    });
+
+    // "Now" / "Next": one line that says where the work is, and takes you to that card
+    const cur = cards.find((x) => x.s2.status === 'in_progress') || (done && done < steps.length || stateCls === 'approved' && done < steps.length ? cards.find((x) => x.s2.status !== 'completed') : null);
+    if (cur) {
+      const live = cur.s2.status === 'in_progress';
+      const nowEl = document.createElement('button'); nowEl.type = 'button'; nowEl.className = 'pnow' + (live ? ' live' : '');
+      const lab = document.createElement('b'); lab.textContent = live ? 'Now' : 'Next';
+      const tx = document.createElement('span'); tx.textContent = (cur.i + 1) + '. ' + (stepParts(cur.s2).title || cur.s2.text);
+      nowEl.append(lab, tx);
+      nowEl.title = 'Click to go to this ' + unit[0];
+      const go = (smooth) => {
+        if (cur.col.el.classList.contains('collapsed')) { cur.col.el.classList.remove('collapsed'); cur.col.hd.setAttribute('aria-expanded', 'true'); }
+        cur.card.scrollIntoView({ block: 'center', behavior: smooth ? 'smooth' : 'auto' });
+        cur.card.classList.remove('flash'); void cur.card.offsetWidth; cur.card.classList.add('flash');
+      };
+      nowEl.addEventListener('click', () => go(true));
+      sec.insertBefore(nowEl, legend);
+      sec.now = live ? { id: key + ':' + cur.i, go } : null;
+    }
+    sec.append(board);
     return sec;
   }
 
   function renderPlans() {
+    const keepScroll = planEl.scrollTop;
     planEl.textContent = '';
-    let any = false;
+    // starting a plan from here: a new Claude Code conversation in plan mode
+    const tools = document.createElement('div'); tools.className = 'ptools';
+    const nb = document.createElement('button'); nb.type = 'button'; nb.className = 'primary'; nb.id = 'newPlan'; nb.textContent = 'New plan';
+    nb.title = 'Open a new Claude Code conversation in plan mode: Claude researches without changing anything, then proposes a plan';
+    nb.addEventListener('click', () => vscode.postMessage({ type: 'newPlan' }));
+    const hint = document.createElement('span'); hint.className = 'phint';
+    hint.textContent = 'Opens a new Claude Code conversation in plan mode. In a running conversation, switch with Shift+Tab or the mode picker.';
+    // Refresh: work the plan and the task list out again from everything Claude Code has reported
+    const rb = document.createElement('button'); rb.type = 'button'; rb.className = 'seg'; rb.id = 'planRefresh'; rb.textContent = 'Refresh';
+    rb.title = 'Load the latest plan file from disk, and work the plan and the task list out again from what Claude Code has reported';
+    if (planUi.note) rb.textContent = planUi.note;
+    rb.addEventListener('click', () => {
+      plans = new Map();
+      for (const e of history) if (shown(e)) planApply(e, false);
+      planUi.touched = 0; planUi.now = '';
+      planNote('Refreshing…');
+      vscode.postMessage({ type: 'planRefresh' });   // the extension reads the plan file again and answers
+      const again = document.getElementById('planRefresh');
+      if (again) again.focus();
+    });
+    tools.append(nb, rb, hint);
+    planEl.append(tools);
+    let any = false, now = null;
     for (const S of plans.values()) {
+      const tag = sessionTag(S.id);
       if (S.plan) {
         any = true;
-        const text = { waiting: 'Waiting for your approval', approved: 'Approved', changes: 'Not approved yet' }[S.plan.state] || '';
-        planEl.append(planChart(S.plan.title, text, S.plan.state, S.plan.steps, 'Step'));
+        const text = { draft: 'Draft, not proposed yet', waiting: 'Waiting for your approval', approved: 'Approved', changes: 'Not approved yet' }[S.plan.state] || '';
+        const linked = linkTasks(S.plan.steps, S.tasks.filter((t) => !t.old));
+        const guess = S.plan.state === 'approved' && opts.estimate !== false ? inferSteps(S.plan.steps, S) : [];
+        const steps = S.plan.steps.map((st, i) => Object.assign({}, st, st.marked || linked[i].fromTasks || !guess[i] ? linked[i] : guess[i]));
+        const el = planChart(S.plan.title + (tag ? ' · ' + tag : ''), text, S.plan.state, steps, 'Step', S.plan.intro, 'p:' + S.id);
+        planEl.append(el);
+        if (el.now) now = el.now;
       }
       if (S.tasks.length) {
         any = true;
         const done = S.tasks.filter((t) => t.status === 'completed').length;
-        planEl.append(planChart('Task list', done + ' of ' + S.tasks.length + ' done', done === S.tasks.length ? 'approved' : '', S.tasks, 'Task'));
+        const el = planChart('Task list' + (tag ? ' · ' + tag : ''), done + ' of ' + S.tasks.length + ' done', done === S.tasks.length ? 'approved' : '', S.tasks, 'Task', '', 't:' + S.id);
+        planEl.append(el);
+        if (el.now && !now) now = el.now;
       }
     }
     $('viewPlan').classList.toggle('has', any);
+    tools.classList.toggle('lone', !any);
     if (!any) {
       const p = document.createElement('p'); p.className = 'pempty';
-      p.textContent = 'No plan yet. When Claude Code proposes a plan (plan mode) or makes a task list, it appears here as a flowchart, and tasks are marked off as they get done.';
+      p.textContent = 'No plan yet. When Claude Code proposes a plan (plan mode) or makes a task list, it appears here as a board, and steps are marked off as they get done.';
       planEl.append(p);
     }
+    planEl.scrollTop = keepScroll;
+    // follow the work: when Claude moves to another step, bring its card into view
+    const id = now ? now.id : '';
+    if (id && id !== planUi.now && !planEl.hidden && opts.follow !== false && Date.now() - planUi.touched > 4000) now.go(false);
+    planUi.now = id;
   }
+  planUi.touched = 0;
+  planEl.addEventListener('wheel', () => { planUi.touched = Date.now(); }, { passive: true });
+  planEl.addEventListener('pointerdown', () => { planUi.touched = Date.now(); });
+  planEl.addEventListener('keydown', () => { planUi.touched = Date.now(); });
 
   // ---------- feed ----------
   const CAT_ORDER = ['Read', 'Edit', 'Shell', 'Search', 'Web', 'Agents', 'Guard', 'Connector', 'Other'];
@@ -936,7 +1443,7 @@
     const el = document.createElement('details'); el.open = true; el.className = 'group ' + actor.kind;
     const sum = document.createElement('summary');
     const dot = document.createElement('i'); dot.className = 'dot';
-    const name = document.createElement('span'); name.className = 'name'; name.textContent = actor.kind === 'main' ? 'Claude' : actor.label;
+    const name = document.createElement('span'); name.className = 'name'; name.textContent = actor.kind === 'main' ? 'Claude' + (sessionTag(actor.session) ? ' · ' + sessionTag(actor.session) : '') : actor.label;
     const state = document.createElement('span'); state.className = 'state';
     sum.append(dot, name, state);
     const desc = document.createElement('div'); desc.className = 'desc'; desc.textContent = actor.info || ''; desc.hidden = !actor.info;
@@ -1033,12 +1540,12 @@
   }
 
   function fit(immediate) {
-    if (!nodes.size || !width) return;
+    if (!nodes.size || width < 2 || height < 2) return;   // hidden or collapsed: a zero scale would break the maths
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     for (const n of nodes.values()) {
       x0 = Math.min(x0, n.x); y0 = Math.min(y0, n.y); x1 = Math.max(x1, n.x); y1 = Math.max(y1, n.y);
     }
-    const k = Math.min(1.5, Math.min(width / (x1 - x0 + 170), height / (y1 - y0 + 150)));
+    const k = Math.max(0.2, Math.min(1.5, Math.min(width / (x1 - x0 + 170), height / (y1 - y0 + 150))));
     const tx = width / 2 - ((x0 + x1) / 2) * k, ty = height / 2 - ((y0 + y1) / 2) * k;
     const s = immediate ? 1 : 0.12;
     view.k += (k - view.k) * s; view.x += (tx - view.x) * s; view.y += (ty - view.y) * s;
@@ -1139,6 +1646,9 @@
   }
 
   function frame(now) {
+    // nothing to draw while another view is showing; applyUi() starts the loop again
+    if (canvas.hidden) { running = false; return; }
+    if ((window.devicePixelRatio || 1) !== lastDpr) resize();   // moved to a display with another scale
     let busy = alpha > 0 || !!drag;
     if (alpha > 0) step();
     for (const n of nodes.values()) {
@@ -1155,8 +1665,9 @@
     if (!running) { running = true; requestAnimationFrame(frame); }
   }
 
+  let lastDpr = 0;
   function resize() {
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = lastDpr = window.devicePixelRatio || 1;
     width = stage.clientWidth; height = stage.clientHeight;
     canvas.width = Math.max(1, Math.round(width * dpr));
     canvas.height = Math.max(1, Math.round(height * dpr));
@@ -1179,7 +1690,7 @@
     st.textContent = waitingNow ? 'Waiting for your approval' : state.connected ? 'Connected' : 'Not connected';
     st.title = state.port ? 'Listening on 127.0.0.1:' + state.port : '';
     $('counts').textContent = nodes.size
-      ? (mains || agents ? 'Claude is working' + (agents ? ' with ' + agents + (agents === 1 ? ' sub-agent' : ' sub-agents') : '') : 'Claude is idle') +
+      ? (waitingNow ? 'Answer in Claude Code to let it continue' : mains || agents ? 'Claude is working' + (agents ? ' with ' + agents + (agents === 1 ? ' sub-agent' : ' sub-agents') : '') : 'Claude is idle') +
         ' · ' + files + (files === 1 ? ' file' : ' files') + ' touched, ' + edited + ' edited'
       : '';
     for (const g of groups.values()) {
@@ -1188,12 +1699,15 @@
       g.el.classList.toggle('working', st === 'working');
       g.el.classList.toggle('finished', st === 'finished');
     }
-    $('connect').hidden = state.connected;
+    $('connect').hidden = state.connected || !nodes.size;   // on an empty chart the button is in the middle of it
+    $('emptyConnect').hidden = state.connected || !state.hasFolder;
+    $('menuNote').textContent = state.extVersion ? 'Version ' + state.extVersion + (state.port ? ' · listening on port ' + state.port : '') : '';
     if (state.extVersion) {
       $('update').title = 'Installed: v' + state.extVersion + ' on VS Code ' + state.vscodeVersion +
-        '. Click to install a newer .vsix of this extension.';
+        '. Installs a newer .vsix of this extension that you pick.';
     }
     $('empty').hidden = nodes.size > 0 || ui.view === 'plan';
+    $('replay').disabled = !history.length;
     $('emptyHint').textContent = state.connected
       ? 'Start Claude Code in this folder and give it a task. Its actions appear here as they happen.'
       : state.hasFolder
@@ -1244,10 +1758,19 @@
     if (n !== hover) { hover = n; kick(); }
     canvas.classList.toggle('pointing', !!n);
     if (n) {
-      tip.hidden = false; tip.className = ''; tip.textContent = tipText(n);
-      tip.style.left = Math.min(p.sx + 14, width - 200) + 'px'; tip.style.top = p.sy + 16 + 'px';
-    } else tip.hidden = true;
+      tip.className = ''; tip.textContent = tipText(n);
+      tip.style.maxWidth = Math.max(140, width - 8) + 'px'; tip.style.maxHeight = '';
+      tip.hidden = false;
+      // keep the whole tip inside the panel: beside the pointer, or above it near the bottom edge
+      const tw = tip.offsetWidth, th = tip.offsetHeight;
+      const top = p.sy + 16 + th > height - 4 ? Math.max(4, p.sy - th - 10) : p.sy + 16;
+      tip.style.left = Math.max(4, Math.min(p.sx + 14, width - tw - 4)) + 'px'; tip.style.top = top + 'px';
+    } else hideTip();
   });
+  // a drag that the system interrupts (focus lost, pointer taken away) must end too
+  const dropDrag = () => { drag = null; canvas.classList.remove('dragging'); };
+  canvas.addEventListener('pointercancel', dropDrag);
+  canvas.addEventListener('lostpointercapture', dropDrag);
   canvas.addEventListener('pointerup', () => {
     const d = drag; drag = null;
     canvas.classList.remove('dragging');
@@ -1264,17 +1787,23 @@
     autoFit = false; kick();
   }, { passive: false });
 
+  // a panel opened for the first time starts the way the settings say; after that it keeps what you chose in it
+  let uiFresh = !(vscode.getState && vscode.getState());
   const ui = Object.assign({ mode: 'agent', view: 'flow', align: false }, (vscode.getState && vscode.getState()) || {});
   function applyUi() {
+    hideTip();   // a tip left over from the view being switched away from
     const byAgent = ui.mode !== 'time';
     groupsEl.hidden = !byAgent; feed.hidden = byAgent;
     $('modeAgent').classList.toggle('on', byAgent); $('modeTime').classList.toggle('on', !byAgent);
     const flowView = ui.view === 'flow', planView = ui.view === 'plan', graphView = !flowView && !planView;
     flowEl.hidden = !flowView; planEl.hidden = !planView; canvas.hidden = !graphView; $('legend').hidden = !graphView;
     $('viewFlow').classList.toggle('on', flowView); $('viewGraph').classList.toggle('on', graphView); $('viewPlan').classList.toggle('on', planView);
+    for (const [id, on] of [['viewFlow', flowView], ['viewGraph', graphView], ['viewPlan', planView], ['modeAgent', byAgent], ['modeTime', !byAgent], ['toggleAside', ui.aside !== false]]) $(id).setAttribute('aria-pressed', String(on));
     $('fit').hidden = planView;
     document.body.classList.toggle('noAside', ui.aside === false);
     if ($('toggleAside')) $('toggleAside').classList.toggle('on', ui.aside !== false);
+    document.body.dataset.view = flowView ? 'flow' : planView ? 'plan' : 'graph';   // lets the styles differ per view
+    placeAnswer();
     $('align').hidden = !flowView; $('align').classList.toggle('on', !!ui.align);
     $('align').setAttribute('aria-pressed', String(!!ui.align));
     for (const T of turns) T.dirty = true;
@@ -1327,6 +1856,7 @@
   function rebuild() {
     if (replayTimer) { clearInterval(replayTimer); replayTimer = null; replayClock = 0; $('replay').textContent = 'Replay'; }
     reset();
+    tagged = !onlySession && sessions.size > 1;
     for (const e of history) if (shown(e)) apply(e, false);
     closeStale();
     for (let i = 0; i < 260 && alpha > 0; i++) step(); // settle the graph before showing it
@@ -1369,41 +1899,177 @@
     }
     autoFit = true; fit(true); kick();
   });
-  $('clear').addEventListener('click', () => vscode.postMessage({ type: 'clear' }));
-  $('connect').addEventListener('click', () => vscode.postMessage({ type: 'connect' }));
-  $('demo').addEventListener('click', () => vscode.postMessage({ type: 'demo' }));
-  $('parallelDemo').addEventListener('click', () => vscode.postMessage({ type: 'parallelDemo' }));
-  $('usageGuardDemo').addEventListener('click', () => vscode.postMessage({ type: 'usageGuardDemo' }));
-  $('update').addEventListener('click', () => vscode.postMessage({ type: 'update' }));
+  // Rare actions live in a small menu, so the toolbar keeps to what is used while watching.
+  const menu = $('menu'), more = $('more');
+  function closeMenu(refocus) {
+    if (menu.hidden) return;
+    menu.hidden = true; more.classList.remove('on'); more.setAttribute('aria-expanded', 'false');
+    if (refocus) more.focus();
+  }
+  function openMenu() {
+    menu.hidden = false; more.classList.add('on'); more.setAttribute('aria-expanded', 'true');
+    // under the button, kept inside the panel
+    const r = more.getBoundingClientRect();
+    menu.style.top = Math.round(r.bottom + 4) + 'px';
+    menu.style.right = Math.max(6, Math.round(document.documentElement.clientWidth - r.right)) + 'px';
+    const first = menu.querySelector('button'); if (first) first.focus();
+  }
+  more.addEventListener('click', (ev) => { ev.stopPropagation(); if (menu.hidden) openMenu(); else closeMenu(true); });
+  document.addEventListener('click', (ev) => { if (!menu.contains(ev.target)) closeMenu(false); });
+  window.addEventListener('blur', () => closeMenu(false));
+  document.addEventListener('keydown', (ev) => {
+    if (menu.hidden) return;
+    if (ev.key === 'Escape') { closeMenu(true); return; }
+    if (ev.key !== 'ArrowDown' && ev.key !== 'ArrowUp') return;
+    ev.preventDefault();
+    const items = [...menu.querySelectorAll('button')];
+    const at = items.indexOf(document.activeElement);
+    items[(at + (ev.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length].focus();
+  });
+  const send = (id, type) => $(id).addEventListener('click', () => { closeMenu(false); vscode.postMessage({ type }); });
+  send('clear', 'clear'); send('update', 'update'); send('settings', 'settings');
+  send('connect', 'connect'); send('connect2', 'connect');
+  send('demo', 'demo'); send('parallelDemo', 'parallelDemo'); send('usageGuardDemo', 'usageGuardDemo');
+  send('demo2', 'demo'); send('parallelDemo2', 'parallelDemo'); send('usageGuardDemo2', 'usageGuardDemo');
+
+  // ---------- Claude usage, from the usage bar ----------
+  function tokShort(n) { return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? Math.round(n / 1e3) + 'k' : String(Math.round(n || 0)); }
+  function clockAt(ts) { return ts ? new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }) : ''; }
+  // a limit that resets on another day needs the day: "21:28" alone reads as tonight
+  function resetAt(ts) {
+    if (!ts) return '';
+    const d = new Date(ts), n = new Date();
+    if (d.toDateString() === n.toDateString() || ts - n.getTime() < 12 * 3600e3) return clockAt(ts);
+    return d.toLocaleDateString([], { weekday: 'short' }) + ' ' + clockAt(ts);
+  }
+  // "5-hour session" -> "5h", "Weekly (all models)" -> "Week", "Weekly (Fable)" -> "Week · Fable"
+  function shortLimit(label) {
+    const l = String(label).replace(/^Current /i, '').replace(/ limit$/i, '');
+    if (/^(5-hour session|session)$/i.test(l)) return '5h';
+    const w = l.match(/^week(?:ly)?\s*\((.+)\)$/i);
+    if (w) return /^all models$/i.test(w[1]) ? 'Week' : 'Week · ' + w[1].replace(/ only$/i, '');
+    return l;
+  }
+  function usageChip(parent, text, cls, title) {
+    const c = document.createElement('span'); c.className = 'uchip ' + (cls || ''); c.textContent = text; c.title = title || '';
+    parent.append(c); return c;
+  }
+  // a real progress bar: the track is the whole limit, the fill is how much of it is used
+  function usageMeter(parent, label, percent, cls, note, title) {
+    const p = Math.max(0, Math.min(100, percent));
+    const c = document.createElement('span'); c.className = 'uchip umeter ' + (cls || ''); c.title = title || '';
+    const name = document.createElement('span'); name.className = 'uname'; name.textContent = label;
+    const track = document.createElement('span'); track.className = 'utrack';
+    const fill = document.createElement('i'); fill.style.width = p.toFixed(1) + '%';
+    track.append(fill);
+    const val = document.createElement('span'); val.textContent = Math.round(p) + '%';
+    c.append(name, track, val);
+    // the reset time is its own element so a narrow panel can leave it to the tooltip
+    if (note) { const n = document.createElement('span'); n.className = 'unote'; n.textContent = '· ' + note; c.append(n); }
+    parent.append(c); return c;
+  }
+  let lastUsage = null;
+  function renderUsage(u) {
+    const el = $('usage');
+    lastUsage = u;
+    el.textContent = '';
+    if (!u || opts.usage === false) { el.hidden = true; return; }
+    el.hidden = false;
+    const tip = [];
+    const level = (p) => (p >= u.errorAt ? ' err' : p >= u.warnAt ? ' warn' : '');
+    if (u.live && u.buckets.length) {
+      for (const b of u.buckets) {
+        const p = Math.max(0, Math.min(100, b.percent));
+        usageMeter(el, shortLimit(b.label), p, level(p).trim(), b.resetsAt ? 'resets ' + resetAt(b.resetsAt) : '', b.label + ': ' + Math.round(p) + '% used' + (b.resetsAt ? ', resets ' + resetAt(b.resetsAt) : ''));
+        tip.push(b.label + ': ' + Math.round(p) + '%' + (b.resetsAt ? ', resets ' + resetAt(b.resetsAt) : ''));
+      }
+    } else if (u.block) {
+      const bl = u.block;
+      if (u.budget > 0) {
+        const p = (bl.work / u.budget) * 100;
+        usageMeter(el, '5h', p, level(p).trim(), 'ends ' + clockAt(bl.end) + ' (estimate)', '5-hour block, against your token budget');
+      } else {
+        usageChip(el, '5h ' + tokShort(bl.work) + ' tokens · ends ' + clockAt(bl.end) + ' (estimate)', '', '5-hour block');
+      }
+      tip.push('5-hour block: ' + tokShort(bl.work) + ' tokens in ' + bl.messages + ' replies');
+    }
+    // with real limits on show, the local token count is detail: it stays in the tooltip
+    if (!(u.live && u.buckets.length)) usageChip(el, '7d ' + tokShort(u.week.work) + ' tokens', '', 'Last 7 days, this computer');
+    if (u.stale) usageChip(el, 'not updating', 'warn', u.error || 'The last request for the plan limits failed; these are the last good numbers');
+    tip.push('Last 7 days: ' + tokShort(u.week.work) + ' tokens in ' + u.week.messages + ' replies');
+    if (u.error) tip.push('Plan limits: ' + u.error);
+    el.title = tip.join('\n') + '\nClick to refresh';
+  }
+  $('usage').addEventListener('click', () => vscode.postMessage({ type: 'usageRefresh' }));
+  $('usage').setAttribute('role', 'button'); $('usage').tabIndex = 0; $('usage').setAttribute('aria-label', 'Claude usage. Activate to refresh.');
+  $('usage').addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); vscode.postMessage({ type: 'usageRefresh' }); } });
 
   // ---------- messages from the extension ----------
   window.addEventListener('message', (m) => {
     const msg = m.data;
     if (!msg) return;
+    if (msg.type === 'usage') { renderUsage(msg.usage); return; }
+    if (msg.type === 'planRefreshed') {
+      planNote(msg.sent ? 'Plan file reloaded' : msg.missing && msg.missing === msg.plans ? 'No plan file found' : 'Up to date');
+      return;
+    }
     if (msg.type === 'init') {
-      history = (msg.events || []).slice();
-      sessions = new Map(); onlySession = '';
-      for (const e of history) noteSession(e);
-      fillPicker();
-      rebuild();
+      const evs = msg.events || [];
+      const n = history.length;
+      // The extension sends the whole history again each time the panel is shown. When it is what
+      // is already drawn (plus, at most, newer events), keep the chart as it is: rebuilding lost
+      // the session filter, the scroll position, opened boxes and the graph's layout.
+      if (n && evs.length >= n && evs[0].id === history[0].id && evs[n - 1].id === history[n - 1].id) {
+        for (const e of evs.slice(n)) {
+          history.push(e);
+          noteSession(e);
+          if (shown(e)) { if (replayTimer) replayList.push(e); else apply(e, true); }
+        }
+        if (!replayTimer && tagged !== (!onlySession && sessions.size > 1)) rebuild();
+      } else {
+        const keep = onlySession;
+        history = evs.slice();
+        sessions = new Map(); onlySession = '';
+        for (const e of history) noteSession(e);
+        if (keep && sessions.has(keep)) onlySession = keep;   // the session being looked at is still there
+        fillPicker();
+        rebuild();
+      }
     } else if (msg.type === 'event') {
       history.push(msg.event);
       noteSession(msg.event);
-      if (shown(msg.event)) {
+      if (!replayTimer && tagged !== (!onlySession && sessions.size > 1)) rebuild();   // labels gain or lose their session tag
+      else if (shown(msg.event)) {
         if (replayTimer) replayList.push(msg.event); // played when its turn comes
         else apply(msg.event, true);
       }
     } else if (msg.type === 'state') {
-      const o = Object.assign({ autoPlan: true, group: true, fold: true }, msg.opts || {});
+      const o = Object.assign({}, OPT_DEFAULTS, msg.opts || {});
       const redo = o.group !== opts.group || o.fold !== opts.fold;
+      const looks = o.density !== opts.density || o.timings !== opts.timings || o.answer !== opts.answer;
+      const plansChanged = o.foldPhases !== opts.foldPhases || o.estimate !== opts.estimate;
+      const usageChanged = o.usage !== opts.usage;
       state = msg; opts = o;
+      document.body.classList.toggle('compact', opts.density === 'compact');
+      document.body.classList.toggle('noTimes', opts.timings === false);
+      if (uiFresh) {
+        uiFresh = false;
+        ui.view = opts.defaultView; ui.mode = opts.mode; if (opts.aside === false) ui.aside = false;
+        applyUi();
+      }
       if (redo && history.length) rebuild();
+      else {
+        if (looks) { placeAnswer(); for (const T of turns) T.dirty = true; queueLines(); }
+        if (plansChanged) renderPlans();
+      }
+      if (usageChanged) renderUsage(lastUsage);
     }
     refreshChrome();
     kick();
   });
 
   new MutationObserver(() => { readTheme(); kick(); }).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+  new ResizeObserver(placeAnswer).observe(answerBar);
   new ResizeObserver(() => { resize(); for (const T of turns) T.dirty = true; queueLines(); }).observe(stage);
   readTheme();
   applyUi();
