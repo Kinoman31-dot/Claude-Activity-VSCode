@@ -1,0 +1,97 @@
+Activity Graph for Claude Code
+Licence
+
+Copyright (c) 2026 Laurent Nauleau. All rights reserved.
+
+This licence applies to version 0.10.9 of the software and to every later
+version. By installing, copying or using the software you accept it.
+
+
+1. Words used here
+
+"The software" is the Activity Graph for Claude Code extension: everything in
+this repository, including the usage bar, the usage guard scripts, the test
+harness and the documentation.
+
+"The author" is the copyright holder named above.
+
+"Personal use" is use by one person for their own private purposes: not at
+work, not for an employer, a client, a company or any other organisation, and
+not as part of any paid activity.
+
+"Professional use" is every other use. It includes use at work, use by or for
+a company, an organisation, a public body or a freelancer, and use in
+connection with any paid or commercial activity.
+
+
+2. Personal use is free
+
+You may install and use the software, unmodified, for personal use at no
+charge. You may keep copies for yourself as backups.
+
+
+3. Professional use needs a paid licence
+
+Professional use is allowed only after you have bought a licence from the
+author. Without one, professional use is not permitted, including for
+evaluation. Ask the author for the terms and the price (see section 9).
+
+
+4. No modification, except on request
+
+You may not modify, adapt or translate the software, and you may not build
+other work on it. If you need a change, ask the author: the author may make
+the change, or may give you written permission to make it. A permission
+covers only what it says.
+
+
+5. No distribution and no commercial use by anyone but the author
+
+Only the author may distribute the software or make money from it. You may
+not, in whole or in part:
+
+  - give, publish, share or redistribute the software or copies of it;
+  - sell, rent, lease or sublicense it;
+  - include it in another product or package;
+  - offer it to others as a service, hosted or otherwise;
+  - use it, or anything taken from it, in any other commercial way.
+
+Get the software only from the author's own repository or from a copy the
+author gave you.
+
+Nothing here limits what the terms of the service hosting this repository
+allow every user to do with a public repository, such as viewing it.
+
+
+6. Your suggestions
+
+If you send the author a suggestion, a correction or a proposed change, the
+author may use it in the software without owing you anything.
+
+
+7. Names and other software
+
+The software is unofficial. It is not made, endorsed or supported by
+Anthropic. "Claude" and "Claude Code" belong to their owner, and this licence
+gives no rights to them or to any other software the extension works with.
+
+
+8. No warranty, and limits of liability
+
+The software is provided "as is", without warranty of any kind, express or
+implied, including fitness for a particular purpose and non-infringement. To
+the extent the law allows, the author is not liable for any claim, damage or
+other liability arising from the software or from its use, including lost
+work, lost data and costs of any kind.
+
+Your rights under this licence end automatically if you break any of its
+terms. You must then stop using the software and delete your copies.
+
+
+9. Asking for a licence or a permission
+
+Open an issue in the author's repository, or use the contact given there:
+
+  https://github.com/Kinoman31-dot/Claude-Activity-VSCode
+
+Every right not expressly given in this licence is kept by the author.

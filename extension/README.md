@@ -116,3 +116,7 @@ Other:
 - Events arrive only while VS Code is open with this folder. Claude Code keeps working normally when it is closed.
 - If your organisation restricts HTTP hooks (`allowedHttpHookUrls`), `http://127.0.0.1:*` must be allowed.
 - Events are saved in VS Code's storage for this workspace (the last 3000), so the chart survives a reload. They include file paths, shell commands and your prompts, and stay on your computer. **Clear** deletes them.
+
+## Licence
+
+Free for personal use. Professional use needs a paid licence from the author. No modification except on request, and no distribution or commercial use by anyone but the author. The full terms are in `LICENCES.txt`. Versions before 0.10.9 were published under the MIT licence.
